@@ -24,19 +24,22 @@ WSL Ubuntu 内（路径含 `/mnt/d`，无空格无需引号）：
 ```bash
 cd /mnt/d/workspace/comeputerDesign/05_MyCPUcode/mycpu_env
 
-# 1) 没有自己的测试程序时，直接用 golden mif 顶上：
-cp ../for_test_obj/ex1_obj/*.mif func/obj/
+# 1) 编译测试程序（需工具链 PATH，见下"注意"）：
+make -C func                    # 全量 81 个测试点
+make -C func EXP=N              # 按实验选点，N={0,6-16,18-19,21-23}（Makefile 会提示）
 
-# 2) 参考 CPU 生成 golden trace（秒级，20 测试点 PASS 为基准）：
+# 2) 参考 CPU 生成 golden trace（秒级；全量时 81 测试点 PASS 为基准）：
 make -C gettrace iverilog
 
-# 3) 你的 myCPU 跑同一程序并与 golden trace 比对（编译错误=实验1接口改造点，属预期）：
+# 3) 你的 myCPU 跑同一程序并与 golden trace 比对（当前编译错误=实验1接口改造点，属预期）：
 make -C soc_verify/soc_bram/testbench iverilog
 ```
 
-装好工具链后，第 1 步换成 `make -C func`（自行编译测试点，`make EXP=N` 跑单个），其余不变。
-
 ## 注意
+
+- **工具链 PATH**：已解压至 WSL `/root/tools/loongarch32r-linux-gnusf-2022-05-20/bin`，持久生效需在 `~/.bashrc` 追加一行：
+  `export PATH=/root/tools/loongarch32r-linux-gnusf-2022-05-20/bin:$PATH`
+- **踩坑记录（09-10）**：`make` 中途失败会在 `func/obj/` 留下 0 字节的 `.s/.o`，时间戳比源码新 → 重跑报 `undefined reference` 假错。清掉 `func/obj/*.s *.o libinst.a` 重建即可。
 
 - `func/obj/`、`golden_trace.txt`、`*.sim/`、`project/` 等生成物已被 .gitignore 排除。
 - 换目录/换机器后**别直接打开旧 `.xpr`**，用各 `run_vivado/create_project.tcl` 重建工程。

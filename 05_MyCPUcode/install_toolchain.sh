@@ -7,14 +7,19 @@ set -e
 TOOLS=$HOME/tools
 BINPREFIX=loongarch32r-linux-gnusf
 
-# 1) 找包
+# 1) 找包（也可把包路径作为参数传入：bash install_toolchain.sh /path/to/xxx.tar.gz）
+if [ -n "$1" ]; then
+  CAND="$1"
+else
 CAND=$(ls -1t \
   /mnt/d/Downloads/*loongarch32r*.tar.{gz,xz} \
   /mnt/d/Downloads/*gnusf*.tar.{gz,xz} \
   /mnt/c/Users/Dusti/Downloads/*loongarch32r*.tar.{gz,xz} \
   /mnt/c/Users/Dusti/Downloads/*gnusf*.tar.{gz,xz} \
+  /mnt/d/workspace/comeputerDesign/nscscc2025个人赛发布包_loongarch_v1.0/*loongarch32r*.tar.{gz,xz} \
   /mnt/d/workspace/comeputerDesign/05_MyCPUcode/*loongarch32r*.tar.{gz,xz} \
   /mnt/d/workspace/comeputerDesign/05_MyCPUcode/*gnusf*.tar.{gz,xz} 2>/dev/null | head -1)
+fi
 
 if [ -z "$CAND" ]; then
   echo "!! 没找到 loongarch32r-linux-gnusf 工具链包。"

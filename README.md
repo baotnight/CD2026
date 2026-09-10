@@ -39,7 +39,8 @@ comeputer Design/
 │       └── VirtualBox-6.0.10-132072-Win.exe   # 旧实验环境虚拟机安装器（LA 组通常不需要）
 │
 ├── 04_MyLab/                           报告 / 验收记录 / 进度记录
-└── 05_MyCPUcode/                       ★ 实验代码工作区（见其 README；纯英文无空格路径，Vivado 直接可用）
+├── 05_MyCPUcode/                       ★ 实验代码工作区（见其 README；纯英文无空格路径，Vivado 直接可用）
+└── nscscc2025个人赛发布包_loongarch_v1.0/   大赛发布包：documents/ 参考文档（A07 Vivado安装、A09 仿真调试、A10 FPGA在线调试、平台芯片手册等）；工具链 tar.gz 不入库
 ```
 
 ## 快速上手（三句话版）
@@ -64,13 +65,13 @@ comeputer Design/
 | 项 | 状态 |
 |---|---|
 | Ubuntu(WSL2) make/gcc/git/iverilog | ✅ 已装并于 09-10 复核（make 4.3 / gcc 13.3 / git 2.43 / iverilog 12.0——`soc_verify/soc_bram/testbench`、`gettrace` 均有纯 iverilog 仿真流程，**日常 RTL 调试不必等 Vivado**） |
-| iverilog 基线闭环 | ✅ 09-10 实测：用 `for_test_obj/ex1_obj` 现成 mif 跑通 `gettrace`（参考单周期 CPU 20 测试点全 PASS，产出 golden_trace.txt）；`soc_bram` testbench 编译即报实验 1 的接口改造点（`sram_en` 缺失、we 位宽），**改完 myCPU 接口即可闭环比对** |
-| `make func` 链路 | ✅ 已实测跑通到唯一断点：只缺 `loongarch32r-linux-gnusf-*` 工具链 |
+| iverilog 基线闭环 | ✅ 全链路已验证：`make func` 自编译程序（81 测试点）→ `gettrace` 参考 CPU **81/81 PASS** 产出 golden trace；`soc_bram` testbench 编译报的 2 错即实验 1 接口改造点（`sram_en` 缺失、we 位宽），**改完 myCPU 接口即可闭环比对** |
+| `make func` 链路 | ✅ 09-10 打通：工具链就位后全量编译通过（注意：`func/obj/` 曾有工具链安装前遗留的 0 字节 `n10_nor.s`，导致"undefined reference"假错——清掉 `obj/*.s *.o` 重建即可） |
 | cdp_ede_remote 仓库 | ✅ 已 clone（注意：内层 `.git` 已不在，成了普通文件副本，后续更新需重新 clone） |
 | git 工作区 | ✅ 已 init + 提交；09-10 发现系统级 gitconfig `autocrlf=true`，已在仓库内改 `core.autocrlf=false` |
 | 工作区位置 | ✅ 09-10 迁移：源码从 `04_MyLab\cpu_lab` 移至根目录 `05_MyCPUcode\`（git rename 保留历史）；`D:\cpu_lab` junction 已删除，仓库路径纯英文无空格，Vivado/WSL 直接使用 |
-| **Vivado** | ⬜ 待装（约 50–60 GB，勾 Artix-7 器件族，装英文路径；PATH 中残留的 `D:\work\vivado\Vivado\2018.3\bin` 目录已不存在，装新装后记得清理旧 PATH 项） |
-| **LoongArch 工具链包** | ⬜ 待下载：课程网盘"Loongarch 发布包"（手册 §10 链接）放到 `D:\Downloads`（或 `C:\Users\Dusti\Downloads`），然后 WSL 里 `bash "/mnt/d/workspace/comeputerDesign/05_MyCPUcode/install_toolchain.sh"`，按提示加一行 PATH |
+| **Vivado** | ✅ 已装 **2023.2**（`D:\work\vivado\Vivado\2023.2`，Artix-7 器件库已确认在位）。⚠ 系统 PATH 里还是失效的 `...\2018.3\bin`，请在"编辑账户的环境变量"里把它改成 `D:\work\vivado\Vivado\2023.2\bin`（或从开始菜单启动则无需改） |
+| **LoongArch 工具链** | ✅ 已解压到 WSL `/root/tools/loongarch32r-linux-gnusf-2022-05-20/` 并验证。剩最后一步（需你亲手跑，改 `~/.bashrc` 属持久化配置）：`echo 'export PATH=/root/tools/loongarch32r-linux-gnusf-2022-05-20/bin:$PATH' >> ~/.bashrc` |
 | **校内赛平台账号** | ⬜ 找助教开通/确认 |
 
 ## 注意事项

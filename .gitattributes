@@ -1,0 +1,19 @@
+# 行尾规范化：仓库内一律 LF，检出也 LF
+# （本机系统级 gitconfig 为 core.autocrlf=true，若不强制，重新 clone 后
+#   *.sh / Makefile 会被转成 CRLF，WSL 里直接跑不了——2026-09-10 加固）
+* text=auto eol=lf
+
+# 明确按二进制处理，不做任何行尾/编码转换
+*.pdf binary
+*.docx binary
+*.pptx binary
+*.xlsx binary
+*.exe binary
+*.zip binary
+*.tar binary
+*.tar.gz binary
+*.gz binary
+*.mcs binary
+*.bit binary
+*.ltx binary
+*.xci binary

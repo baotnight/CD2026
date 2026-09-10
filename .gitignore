@@ -1,7 +1,12 @@
-# ── GitHub 单文件 100MB 硬限制：以下两个存档仅保留在本地，不入库 ──
+# ── GitHub 单文件 100MB 硬限制：以下存档仅保留在本地，不入库 ──
 #    （均可重新获取：VirtualBox 官网安装包 / 课程网盘《自己动手写CPU》）
 VirtualBox-*.exe
-A06_*
+# 《自己动手写CPU》109MB 扫描存档（文件名是 GBK 乱码字节，无法按名匹配）：
+# 全局排除 A06_*.pdf，再对发布包内的《远程平台使用指南》开例外
+A06_*.pdf
+!nscscc2025个人赛发布包_loongarch_v1.0/documents/A06_*.pdf
+# 工具链压缩包（80MB，课程网盘可重取；已解压至 WSL ~/tools，不入库）
+loongarch32r-linux-gnusf-*.tar.gz
 
 # ── 编译 / 仿真产物 ──
 obj/

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# 在 WSL(Ubuntu) 里运行：bash /mnt/d/cpu_lab/install_toolchain.sh
+# 在 WSL(Ubuntu) 里运行：bash "/mnt/d/workspace/comeputerDesign/05_MyCPUcode/install_toolchain.sh"
 # 前提：已从课程网盘下载 loongarch32r-linux-gnusf 工具链包（.tar.gz/.tar.xz）放到
-#       D:\Downloads 或 C:\Users\<你>\Downloads 或 D:\cpu_lab。
+#       D:\Downloads 或 C:\Users\<你>\Downloads 或 05_MyCPUcode\。
 # 本脚本只解压+验证，不修改任何配置文件；PATH 由脚本最后打印，由你自己决定何时加入 ~/.bashrc。
 set -e
 TOOLS=$HOME/tools
@@ -13,8 +13,8 @@ CAND=$(ls -1t \
   /mnt/d/Downloads/*gnusf*.tar.{gz,xz} \
   /mnt/c/Users/Dusti/Downloads/*loongarch32r*.tar.{gz,xz} \
   /mnt/c/Users/Dusti/Downloads/*gnusf*.tar.{gz,xz} \
-  /mnt/d/cpu_lab/*loongarch32r*.tar.{gz,xz} \
-  /mnt/d/cpu_lab/*gnusf*.tar.{gz,xz} 2>/dev/null | head -1)
+  /mnt/d/workspace/comeputerDesign/05_MyCPUcode/*loongarch32r*.tar.{gz,xz} \
+  /mnt/d/workspace/comeputerDesign/05_MyCPUcode/*gnusf*.tar.{gz,xz} 2>/dev/null | head -1)
 
 if [ -z "$CAND" ]; then
   echo "!! 没找到 loongarch32r-linux-gnusf 工具链包。"

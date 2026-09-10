@@ -38,22 +38,22 @@ comeputer Design/
 │       ├── TinyMIPS_Extend/    # TinyMIPS 流水线扩展模板（含 DivGen/MultGen IP、cp0）
 │       └── VirtualBox-6.0.10-132072-Win.exe   # 旧实验环境虚拟机安装器（LA 组通常不需要）
 │
-└── 04_MyLab/                           ★ 你的实验工作区（见其 README）
-    └── cpu_lab/                        # 实际开发目录；同时有 junction `D:\cpu_lab` 指向这里
+├── 04_MyLab/                           报告 / 验收记录 / 进度记录
+└── 05_MyCPUcode/                       ★ 实验代码工作区（见其 README；纯英文无空格路径，Vivado 直接可用）
 ```
 
 ## 快速上手（三句话版）
 
 1. 按《实验执行手册》§3 装好 Vivado + LoongArch32R 工具链（WSL2 或虚拟机）+ Gitee/平台账号；
-2. 把 `03_.../LA版测评环境_cdp_ede_local` **复制**到无中文空格的英文路径（如 `D:\cpu_lab\`）下建 Vivado 工程，`mycpu_env/myCPU` 里写代码；
+2. 工作副本已就位：`05_MyCPUcode/`（完整路径 `D:\workspace\comeputerDesign\05_MyCPUcode`，纯英文无空格，Vivado 工程可直接在此创建），`mycpu_env/myCPU` 里写代码；
 3. 每个实验：读指导书一章 → 改代码 → `make func` → 仿真比对 `for_test_obj` → 远程平台传 bit 自动评测 → 助教验收 → 写报告。
 
 ## ⚡ 准备进度（2026-09-10 更新）
 
-工作区已建好：**`04_MyLab\cpu_lab\`**（物理位置在本文件夹内，随整库推送到 GitHub；同时 `D:\cpu_lab` 是指向它的**目录联接**，Vivado/WSL 用这个无空格路径访问，两边是同一份文件）。结构：
+工作区已就位：**`05_MyCPUcode\`**（原 `04_MyLab\cpu_lab`，已于 09-10 迁移到根目录；`D:\cpu_lab` junction 已删除——仓库路径本身无中文无空格，不再需要联接）。结构：
 
 ```
-04_MyLab\cpu_lab\        （≡ D:\cpu_lab\）
+05_MyCPUcode\
 ├── mycpu_env\        # 测评环境工作副本（myCPU 写代码、func 测试、gettrace、soc_verify）
 ├── cdp_ede_remote\   # 已 clone 的线上评测适配仓库（remote2local.v / loongson_remote.xdc）
 ├── for_test_obj\     # ex1–ex9 标准产物（只读比对）
@@ -63,17 +63,19 @@ comeputer Design/
 
 | 项 | 状态 |
 |---|---|
-| Ubuntu(WSL2) make/gcc/git/iverilog | ✅ 已装（iverilog 12.0——`soc_verify/soc_bram/testbench` 有纯 iverilog 仿真流程，**日常 RTL 调试不必等 Vivado**） |
+| Ubuntu(WSL2) make/gcc/git/iverilog | ✅ 已装并于 09-10 复核（make 4.3 / gcc 13.3 / git 2.43 / iverilog 12.0——`soc_verify/soc_bram/testbench`、`gettrace` 均有纯 iverilog 仿真流程，**日常 RTL 调试不必等 Vivado**） |
+| iverilog 基线闭环 | ✅ 09-10 实测：用 `for_test_obj/ex1_obj` 现成 mif 跑通 `gettrace`（参考单周期 CPU 20 测试点全 PASS，产出 golden_trace.txt）；`soc_bram` testbench 编译即报实验 1 的接口改造点（`sram_en` 缺失、we 位宽），**改完 myCPU 接口即可闭环比对** |
 | `make func` 链路 | ✅ 已实测跑通到唯一断点：只缺 `loongarch32r-linux-gnusf-*` 工具链 |
-| cdp_ede_remote 仓库 | ✅ 已 clone |
-| git 工作区 | ✅ 已 init + 提交（autocrlf=false，编译产物已 gitignore） |
-| **Vivado** | ⬜ 待装（约 50–60 GB，勾 Artix-7 器件族，装英文路径如 `D:\Xilinx\`） |
-| **LoongArch 工具链包** | ⬜ 待下载：课程网盘"Loongarch 发布包"（手册 §10 链接）放到 `D:\Downloads`，然后 WSL 里 `bash /mnt/d/cpu_lab/install_toolchain.sh`，按提示加一行 PATH |
+| cdp_ede_remote 仓库 | ✅ 已 clone（注意：内层 `.git` 已不在，成了普通文件副本，后续更新需重新 clone） |
+| git 工作区 | ✅ 已 init + 提交；09-10 发现系统级 gitconfig `autocrlf=true`，已在仓库内改 `core.autocrlf=false` |
+| 工作区位置 | ✅ 09-10 迁移：源码从 `04_MyLab\cpu_lab` 移至根目录 `05_MyCPUcode\`（git rename 保留历史）；`D:\cpu_lab` junction 已删除，仓库路径纯英文无空格，Vivado/WSL 直接使用 |
+| **Vivado** | ⬜ 待装（约 50–60 GB，勾 Artix-7 器件族，装英文路径；PATH 中残留的 `D:\work\vivado\Vivado\2018.3\bin` 目录已不存在，装新装后记得清理旧 PATH 项） |
+| **LoongArch 工具链包** | ⬜ 待下载：课程网盘"Loongarch 发布包"（手册 §10 链接）放到 `D:\Downloads`（或 `C:\Users\Dusti\Downloads`），然后 WSL 里 `bash "/mnt/d/workspace/comeputerDesign/05_MyCPUcode/install_toolchain.sh"`，按提示加一行 PATH |
 | **校内赛平台账号** | ⬜ 找助教开通/确认 |
 
 ## 注意事项
 
-- **Vivado 对中文/空格路径敏感**：编号目录仅用于归档；实际建工程的目录用纯英文路径。
+- **Vivado 对中文/空格路径敏感**：`01–03` 编号归档目录勿建工程；代码工作区 `05_MyCPUcode\` 已是纯英文无空格路径，可直接建 Vivado 工程。
 - `.xpr` Vivado 工程文件内含绝对路径，挪动目录后请用各 `run_vivado/create_project.tcl` 重新生成工程。
 - `课程要求.pdf`、`存档_MIPS版/`、`Appendix2020_存档MIPS/` 是旧 MIPS 路线遗留，本届 LA 组以 2026 PPTX 与 2025 指导书附录 A 为准。
 - 评分细节中标注"待定"的项目（创新基础/扩展分值）以助教开学发布为准。

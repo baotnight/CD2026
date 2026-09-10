@@ -21,3 +21,4 @@ vivado*.log
 .webtalk/
 *.bit
 *.ltx
+golden_trace.txt

@@ -1,0 +1,18 @@
+# 工作副本内的构建产物（根 .gitignore 已覆盖大部分，这里保留本地规则以防单仓使用）
+obj/
+*.o
+convert
+.Xil/
+*.runs/
+*.sim/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.gen/
+xsim.dir/
+vivado*.log
+vivado*.jou
+*.str
+.webtalk/
+*.bit
+*.ltx

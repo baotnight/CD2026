@@ -1,0 +1,23 @@
+# ── GitHub 单文件 100MB 硬限制：以下两个存档仅保留在本地，不入库 ──
+#    （均可重新获取：VirtualBox 官网安装包 / 课程网盘《自己动手写CPU》）
+VirtualBox-*.exe
+A06_*
+
+# ── 编译 / 仿真产物 ──
+obj/
+*.o
+convert
+.Xil/
+*.runs/
+*.sim/
+*.cache/
+*.hw/
+*.ip_user_files/
+*.gen/
+xsim.dir/
+*.str
+*.jou
+vivado*.log
+.webtalk/
+*.bit
+*.ltx

@@ -1,33 +1,46 @@
 //-----------------------------------------------------------------------------
-// mycpu_top.v —— 单周期 LA32R 核心（上学期模板）适配实验 1 要求 + 本环境 BRAM 读延迟
+// mycpu_top.v —— 实验1：不考虑（数据）冲突的单发射五级流水 LA32R CPU
 //
-// 相对模板的改动（均标 FIX/NEW，报告素材）：
-//  [NEW-1] 实验1必做①：顶层接口新增 inst_sram_en / data_sram_en（高有效）
-//  [NEW-2] 实验1必做②：inst_sram_we / data_sram_we 由 1bit 改为 4bit 字节写使能
-//          （本单周期版只会整字写：st.w => 4'b1111；ld.b/st.b 等留实验4）
-//  [NEW-3] BRAM(sync_ram) 读为寄存式（发起后下一拍才有效）：
-//          单周期 CPI=1 与其不兼容，故加 FETCH/EXEC/(MEM) 三态等待机。
-//          这正是拆五级流水后 MEM 读 / WB 用天然吻合的原因——本 FSM 是过渡脚手架。
-//  [NEW-4] debug_wb_* 改为"写回事件打一拍"的寄存器输出：
-//          tb 在写回时钟沿后 #1 采样，组合直通会错过事件。
-//  [FIX-1] 模板坑：ALU 例化 .alu_src1 误接 alu_src2 → 所有加法变 2*src2
-//  [FIX-2] 模板坑：gr_we 把 bl 也屏蔽了（bl 应写 r1）
-//  [FIX-3] 模板坑：final_result 未声明（隐式 1bit，写回全被截成 1 位）
-//  [FIX-4] 模板坑：debug_wb_rf_we 因 wen/we 拼写不一致始终无驱动（trace 失效）
-//  （alu.v 内另有 3 处坑，见 alu.v 中 FIX 注释）
+// 流水级：IF → ID → EXE → MEM → WB，级间流水寄存器 + valid/allowin/ready_go 握手。
+// 相对上一版（单周期 FSM 适配版，见 commit e24a505）的改动均标 [PIPE-*]：
+//
+//  [PIPE-1] 五级划分与职责：
+//      IF  ：pc 每拍自增/跳转，向 inst_ram 发读请求。BRAM 是寄存式读——本拍发地址、
+//            下一拍出指令，这个输出寄存器天然充当 IF/ID 之间的指令寄存器，
+//            因此 IF/ID 只需保存 valid 和 pc，不必另存指令。
+//      ID  ：译码 + 读寄存器堆 + 转移判定/目标计算。taken 则下一拍改写 pc，
+//            并把本拍 IF 正在取的错误路径指令置 invalid（LA32 无延迟槽，只需冲 1 条）。
+//      EXE ：ALU 运算；ld/st 在本级发出 data_ram 读写请求（地址 = ALU 结果）。
+//      MEM ：ld 的 BRAM 读数在本拍有效（EXE 发起、正好一拍后到达），选定最终写回值。
+//            与单周期 FSM 版"EXEC 发请求、MEM 取数"的时序完全一致，只是不再需要状态机。
+//      WB  ：写寄存器堆；debug_wb_* 由本级流水寄存器组合输出。
+//  [PIPE-2] 握手：每级 valid / ready_go / allowin（指导书 1.1 的流水级管理策略）。
+//      ex1 不处理数据冲突，各级 ready_go 恒 1 → allowin 链恒 1、流水线从不停顿；
+//      骨架仍按标准式写全：实验 2 加阻塞只需改 ID 级 ready_go，实验 3 加前递只需加旁路 mux。
+//  [PIPE-3] 冲刷：唯一要处理的冲突是控制相关——taken 转移冲掉 IF 里已取的 1 条错误路径
+//      指令（IF/ID valid 置 0）；气泡（valid=0）逐级下传，后级凭 valid 丢弃。
+//  [PIPE-4] 复位 trick：沿用模板"复位后 pc=0x1bfffffc 先发一拍假取指"的手法，
+//      但该假取指地址在程序之外，iverilog 下 BRAM 读出全 X，若放进译码会污染 retire
+//      等条件（单周期 FSM 版在 iverilog 下正因此死锁）。故用 fetch_is_dummy 显式丢弃。
+//  [PIPE-5] trace 接口：debug_wb_* = WB 级流水寄存器的组合输出。tb 在写回时钟沿后
+//      #1 采样，看到的正是"刚进入 WB 的那条指令"，与它写寄存器堆是同一事件；
+//      而每条指令恰好在 WB 停留一拍，不会漏采也不会重采。
+//  [KEEP] 译码、立即数生成、ALU 连接方式与单周期版完全一致（alu.v 已含 3 处模板修复）。
+//      ex1 的 20 个测试点（n1~n20：lu12i_w/add/addi/sub/slt/sltu/and/or/xor/nor/
+//      slli.w/srli.w/srai.w/ld.w/st.w/beq/bne/bl/jirl/b）全部落在该译码集内。
 //-----------------------------------------------------------------------------
 module mycpu_top(
     input  wire        clk,
     input  wire        resetn,
     // inst sram interface
-    output wire        inst_sram_en,     // NEW-1
-    output wire [ 3:0] inst_sram_we,     // NEW-2
+    output wire        inst_sram_en,
+    output wire [ 3:0] inst_sram_we,
     output wire [31:0] inst_sram_addr,
     output wire [31:0] inst_sram_wdata,
     input  wire [31:0] inst_sram_rdata,
     // data sram interface
-    output wire        data_sram_en,     // NEW-1
-    output wire [ 3:0] data_sram_we,     // NEW-2
+    output wire        data_sram_en,
+    output wire [ 3:0] data_sram_we,
     output wire [31:0] data_sram_addr,
     output wire [31:0] data_sram_wdata,
     input  wire [31:0] data_sram_rdata,
@@ -41,58 +54,64 @@ reg reset;
 always @(posedge clk) reset <= ~resetn;
 
 //=========================================================================
-// NEW-3: 三态等待机。FETCH 发地址，EXEC 拿指令执行；ld.w 多等一拍(MEM)拿数
+// [PIPE-2] 各级 valid 与 allowin/ready_go 握手
 //=========================================================================
-localparam S_FETCH = 2'd0,
-           S_EXEC  = 2'd1,
-           S_MEM   = 2'd2;
-reg  [1:0] cur_st;
-wire in_fetch = (cur_st == S_FETCH);
-wire in_exec  = (cur_st == S_EXEC );
-wire in_mem   = (cur_st == S_MEM  );
+reg         if_id_valid;
+reg         id_ex_valid;
+reg         exe_mem_valid;
+reg         mem_wb_valid;
 
-wire inst_ld_w;          //前向声明（译码段定义）
-wire retire = (in_exec && !inst_ld_w) || in_mem;   //本拍末写回/更新pc
+wire        id_valid  = if_id_valid;    //ID 级占位 = IF/ID 寄存器有效
+wire        exe_valid = id_ex_valid;
+wire        mem_valid = exe_mem_valid;
 
-always @(posedge clk) begin
-    if (reset) cur_st <= S_FETCH;
-    else case (cur_st)
-        S_FETCH: cur_st <= S_EXEC;
-        S_EXEC : cur_st <= inst_ld_w ? S_MEM : S_FETCH;
-        S_MEM  : cur_st <= S_FETCH;
-        default: cur_st <= S_FETCH;
-    endcase
-end
+wire        id_ready_go  = 1'b1;        //ex1 无停顿：译码/读寄存器一拍完成
+wire        exe_ready_go = 1'b1;
+wire        mem_ready_go = 1'b1;        //BRAM 读数 EXE 发起、MEM 到达，MEM 无需等待
+
+wire        wb_allowin  = 1'b1;         //WB 每拍必然写完
+wire        mem_allowin = ~mem_valid | (mem_ready_go & wb_allowin );
+wire        exe_allowin = ~exe_valid | (exe_ready_go & mem_allowin);
+wire        id_allowin  = ~id_valid  | (id_ready_go  & exe_allowin);
+wire        if_allowin  = id_allowin;   //IF 每拍即可发取指请求，无需自身 valid
 
 //=========================================================================
-// 取指
+// IF 级：pc 生成 + 取指请求 [PIPE-1][PIPE-4]
 //=========================================================================
-wire [31:0] seq_pc;
-wire [31:0] nextpc;
-wire        br_taken;
-wire [31:0] br_target;
-wire [31:0] inst;
 reg  [31:0] pc;
-
-assign seq_pc = pc + 3'h4;
-assign nextpc = br_taken ? br_target : seq_pc;
+wire        id_br_taken;                //来自 ID 级（前向引用，见译码段）
+wire [31:0] id_br_target;
+wire [31:0] seq_pc = pc + 3'h4;
+wire [31:0] nextpc = id_br_taken ? id_br_target : seq_pc;
+wire        fetch_is_dummy = (pc == 32'h1bfffffc);   //[PIPE-4] 复位假取指
 
 always @(posedge clk) begin
-    if (reset) pc <= 32'h1bfffffc;   //trick: 复位后首拍发出 0x1c000000 的访存请求
-    else if (retire) pc <= nextpc;
+    if (reset)           pc <= 32'h1bfffffc;   //trick：复位后首拍发出 0x1c000000 之前的假请求
+    else if (if_allowin) pc <= nextpc;
 end
 
-assign inst_sram_en    = in_fetch;             //NEW-1：仅在取指拍发读请求
-assign inst_sram_we    = 4'b0;                //NEW-2：指令侧从不写
+assign inst_sram_en    = 1'b1;             //IF 每拍发请求（假取指的返回值会被丢弃）
+assign inst_sram_we    = 4'b0;             //指令侧从不写
 assign inst_sram_addr  = pc;
 assign inst_sram_wdata = 32'b0;
-assign inst            = inst_sram_rdata;     //EXEC 拍有效（寄存式 RAM）
+wire [31:0] inst = inst_sram_rdata;        //BRAM 输出寄存器 = IF/ID 之间的指令寄存器
+
+// IF/ID 流水寄存器：只存 valid 和 pc，指令由 BRAM 输出寄存器承担
+always @(posedge clk) begin
+    if (reset) begin
+        if_id_valid <= 1'b0;
+        if_id_pc    <= 32'b0;
+    end else if (if_allowin) begin
+        if_id_valid <= !fetch_is_dummy && !id_br_taken;  //[PIPE-3][PIPE-4]
+        if_id_pc    <= pc;
+    end
+end
+reg [31:0] if_id_pc;
 
 //=========================================================================
-// 译码（与模板一致）
+// ID 级：译码（与单周期版一致）+ 读寄存器堆 + 转移判定
 //=========================================================================
 wire [11:0] alu_op;
-wire        load_op;
 wire        src1_is_pc;
 wire        src2_is_imm;
 wire        res_from_mem;
@@ -100,9 +119,7 @@ wire        dst_is_r1;
 wire        gr_we;
 wire        mem_we;
 wire        src_reg_is_rd;
-wire [4: 0] dest;
-wire [31:0] rj_value;
-wire [31:0] rkd_value;
+wire [ 4:0] dest;
 wire [31:0] imm;
 wire [31:0] br_offs;
 wire [31:0] jirl_offs;
@@ -136,6 +153,7 @@ wire        inst_slli_w;
 wire        inst_srli_w;
 wire        inst_srai_w;
 wire        inst_addi_w;
+wire        inst_ld_w;
 wire        inst_st_w;
 wire        inst_jirl;
 wire        inst_b;
@@ -158,13 +176,6 @@ wire [31:0] rf_rdata2;
 wire        rf_we   ;
 wire [ 4:0] rf_waddr;
 wire [31:0] rf_wdata;
-
-wire [31:0] alu_src1   ;
-wire [31:0] alu_src2   ;
-wire [31:0] alu_result ;
-
-wire [31:0] mem_result;
-wire [31:0] final_result;                 //FIX-3：模板漏声明，隐式1bit
 
 assign op_31_26  = inst[31:26];
 assign op_25_22  = inst[25:22];
@@ -244,16 +255,150 @@ assign src2_is_imm   = inst_slli_w | inst_srli_w | inst_srai_w |
 
 assign res_from_mem  = inst_ld_w;
 assign dst_is_r1     = inst_bl;
-// FIX-2：模板把 ~inst_bl 也写进 gr_we，导致 bl 不写 r1（应为链接写回）
 assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
 assign mem_we        = inst_st_w;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
 
 assign rf_raddr1 = rj;
 assign rf_raddr2 = src_reg_is_rd ? rd : rk;
+
+wire [31:0] rj_value  = rf_rdata1;
+wire [31:0] rkd_value = rf_rdata2;
+
+//-------------------------------------------------------------------------
+// 转移判定放在 ID [PIPE-1][PIPE-3]：
+//   立即数类目标 = 本级 pc + offs（本级 pc 就是 if_id_pc）；
+//   jirl 目标   = rj_value + offs（rj 在本级刚读出）。
+// taken 时下一拍 pc 改写为目标，同时 IF/ID valid 置 0 冲掉错误路径取指。
+// 气泡（if_id_valid=0）不允许再产生跳转（0 && X = 0，X 不致误触发）。
+//-------------------------------------------------------------------------
+wire rj_eq_rd = (rj_value == rkd_value);
+assign id_br_taken = if_id_valid &&
+                    (   (inst_beq &&  rj_eq_rd)
+                     || (inst_bne && !rj_eq_rd)
+                     ||  inst_jirl
+                     ||  inst_bl
+                     ||  inst_b );
+assign id_br_target = (inst_beq || inst_bne || inst_bl || inst_b)
+                      ? (if_id_pc + br_offs)
+                      : (rj_value + jirl_offs);
+
+//=========================================================================
+// ID/EX 流水寄存器 [PIPE-2]：只向下游传 EXE 真正要用的信号（指导书 1.1 原则）
+//=========================================================================
+reg  [11:0] id_ex_alu_op;
+reg         id_ex_src1_is_pc;
+reg         id_ex_src2_is_imm;
+reg         id_ex_gr_we;
+reg         id_ex_mem_we;
+reg         id_ex_res_from_mem;
+reg  [ 4:0] id_ex_dest;
+reg  [31:0] id_ex_imm;
+reg  [31:0] id_ex_rj_value;
+reg  [31:0] id_ex_rkd_value;
+reg  [31:0] id_ex_pc;
+
+always @(posedge clk) begin
+    if (reset) begin
+        id_ex_valid <= 1'b0;
+        id_ex_pc    <= 32'b0;
+    end else if (exe_allowin) begin
+        id_ex_valid        <= if_id_valid && id_ready_go;
+        id_ex_pc           <= if_id_pc;
+        id_ex_alu_op       <= alu_op;
+        id_ex_src1_is_pc   <= src1_is_pc;
+        id_ex_src2_is_imm  <= src2_is_imm;
+        id_ex_gr_we        <= gr_we;
+        id_ex_mem_we       <= mem_we;
+        id_ex_res_from_mem <= res_from_mem;
+        id_ex_dest         <= dest;
+        id_ex_imm          <= imm;
+        id_ex_rj_value     <= rj_value;
+        id_ex_rkd_value    <= rkd_value;
+    end
+end
+
+//=========================================================================
+// EXE 级：ALU + 发起数据访存请求
+//=========================================================================
+wire [31:0] exe_alu_src1 = id_ex_src1_is_pc ? id_ex_pc : id_ex_rj_value;
+wire [31:0] exe_alu_src2 = id_ex_src2_is_imm ? id_ex_imm : id_ex_rkd_value;
+wire [31:0] exe_alu_result;
+
+alu u_alu(
+    .alu_op     (id_ex_alu_op ),
+    .alu_src1   (exe_alu_src1 ),   //src1=数据/pc，src2=立即数/第二源（见 alu.v FIX 注释）
+    .alu_src2   (exe_alu_src2 ),
+    .alu_result (exe_alu_result)
+);
+
+// 数据访存请求在 EXE 发出；BRAM 寄存式读下一拍（MEM）出数 [PIPE-1]
+// valid 门控：气泡不得访存（其控制位来自垃圾指令的 X，必须挡住）
+assign data_sram_en    = id_ex_valid && (id_ex_res_from_mem | id_ex_mem_we);
+assign data_sram_we    = {4{id_ex_valid && id_ex_mem_we}};   //ex1 仅 st.w 整字写
+assign data_sram_addr  = exe_alu_result;
+assign data_sram_wdata = id_ex_rkd_value;
+
+//=========================================================================
+// EXE/MEM 流水寄存器
+//=========================================================================
+reg  [31:0] exe_mem_pc;
+reg  [31:0] exe_mem_alu_result;
+reg         exe_mem_res_from_mem;
+reg         exe_mem_gr_we;
+reg  [ 4:0] exe_mem_dest;
+
+always @(posedge clk) begin
+    if (reset) begin
+        exe_mem_valid <= 1'b0;
+        exe_mem_pc    <= 32'b0;
+    end else if (mem_allowin) begin
+        exe_mem_valid        <= id_ex_valid && exe_ready_go;
+        exe_mem_pc           <= id_ex_pc;
+        exe_mem_alu_result   <= exe_alu_result;
+        exe_mem_res_from_mem <= id_ex_res_from_mem;
+        exe_mem_gr_we        <= id_ex_gr_we;
+        exe_mem_dest         <= id_ex_dest;
+    end
+end
+
+//=========================================================================
+// MEM 级：选定写回值（ld 的 BRAM 读数本拍有效）[PIPE-1]
+//=========================================================================
+wire [31:0] mem_final_result = exe_mem_res_from_mem ? data_sram_rdata
+                                                    : exe_mem_alu_result;
+
+//=========================================================================
+// MEM/WB 流水寄存器
+//=========================================================================
+reg  [31:0] mem_wb_pc;
+reg         mem_wb_gr_we;
+reg  [ 4:0] mem_wb_dest;
+reg  [31:0] mem_wb_result;
+
+always @(posedge clk) begin
+    if (reset) begin
+        mem_wb_valid <= 1'b0;
+        mem_wb_pc    <= 32'b0;
+    end else if (wb_allowin) begin
+        mem_wb_valid  <= exe_mem_valid && mem_ready_go;
+        mem_wb_pc     <= exe_mem_pc;
+        mem_wb_gr_we  <= exe_mem_gr_we;
+        mem_wb_dest   <= exe_mem_dest;
+        mem_wb_result <= mem_final_result;
+    end
+end
+
+//=========================================================================
+// WB 级：写寄存器堆 + trace 接口 [PIPE-5]
+//=========================================================================
+assign rf_we    = mem_wb_valid && mem_wb_gr_we;
+assign rf_waddr = mem_wb_dest;
+assign rf_wdata = mem_wb_result;
+
 regfile u_regfile(
     .clk    (clk      ),
-    .raddr1 (rf_raddr1),
+    .raddr1 (rf_raddr1),    //ID 级组合读；写口在 WB——无冲突程序按距离≥4 排布
     .rdata1 (rf_rdata1),
     .raddr2 (rf_raddr2),
     .rdata2 (rf_rdata2),
@@ -262,67 +407,9 @@ regfile u_regfile(
     .wdata  (rf_wdata )
     );
 
-assign rj_value  = rf_rdata1;
-assign rkd_value = rf_rdata2;
-
-// 分支：仅 EXEC 拍判定（NEW-3 的 in_exec 取代模板的 valid）
-assign rj_eq_rd  = (rj_value == rkd_value);
-assign br_taken  = (   inst_beq  &&  rj_eq_rd
-                   || inst_bne  && !rj_eq_rd
-                   || inst_jirl
-                   || inst_bl
-                   || inst_b
-                  ) && in_exec;
-assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc + br_offs) :
-                                                   /*inst_jirl*/ (rj_value + jirl_offs);
-
-assign alu_src1 = src1_is_pc  ? pc       : rj_value;
-assign alu_src2 = src2_is_imm ? imm      : rkd_value;
-
-alu u_alu(
-    .alu_op     (alu_op    ),
-    .alu_src1   (alu_src1  ),   // FIX-1：模板误接 alu_src2
-    .alu_src2   (alu_src2  ),
-    .alu_result (alu_result)
-    );
-
-//=========================================================================
-// 访存（NEW-1/2/3）：EXEC 拍发请求；ld 数据在 MEM 拍被写回级取走；
-//                      st 在 EXEC→下一拍边沿写入 BRAM（en/we 只有效一拍的请求窗）
-//=========================================================================
-assign data_sram_en    = in_exec && (inst_ld_w || inst_st_w);
-assign data_sram_we    = {4{in_exec && inst_st_w}};        //NEW-2：st.w 全字
-assign data_sram_addr  = alu_result;
-assign data_sram_wdata = rkd_value;
-
-assign mem_result   = data_sram_rdata;
-assign final_result = res_from_mem ? mem_result : alu_result;
-
-assign rf_we    = gr_we  && retire;
-assign rf_waddr = dest;
-assign rf_wdata = final_result;
-
-//=========================================================================
-// NEW-4: trace 事件打一拍输出（tb 在写回沿后 #1/#2 采样，组合直通会漏）
-//=========================================================================
-reg [31:0] dbg_pc_r;
-reg [ 3:0] dbg_we_r;
-reg [ 4:0] dbg_num_r;
-reg [31:0] dbg_data_r;
-always @(posedge clk) begin
-    if (retire) begin
-        dbg_pc_r    <= pc;
-        dbg_num_r   <= dest;
-        dbg_data_r  <= final_result;
-        dbg_we_r    <= gr_we ? 4'b1111 : 4'b0;   //st/branch 也算"事件但无写"
-    end
-    else begin
-        dbg_we_r    <= 4'b0;
-    end
-end
-assign debug_wb_pc       = dbg_pc_r;    // FIX-4：模板 we/wen 拼写不一致致此口无驱动
-assign debug_wb_rf_we    = dbg_we_r;
-assign debug_wb_rf_wnum  = dbg_num_r;
-assign debug_wb_rf_wdata = dbg_data_r;
+assign debug_wb_pc       = mem_wb_pc;
+assign debug_wb_rf_we    = {4{mem_wb_valid && mem_wb_gr_we}};
+assign debug_wb_rf_wnum  = mem_wb_dest;
+assign debug_wb_rf_wdata = mem_wb_result;
 
 endmodule

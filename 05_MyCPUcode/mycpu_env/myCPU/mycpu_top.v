@@ -1,13 +1,33 @@
+//-----------------------------------------------------------------------------
+// mycpu_top.v —— 单周期 LA32R 核心（上学期模板）适配实验 1 要求 + 本环境 BRAM 读延迟
+//
+// 相对模板的改动（均标 FIX/NEW，报告素材）：
+//  [NEW-1] 实验1必做①：顶层接口新增 inst_sram_en / data_sram_en（高有效）
+//  [NEW-2] 实验1必做②：inst_sram_we / data_sram_we 由 1bit 改为 4bit 字节写使能
+//          （本单周期版只会整字写：st.w => 4'b1111；ld.b/st.b 等留实验4）
+//  [NEW-3] BRAM(sync_ram) 读为寄存式（发起后下一拍才有效）：
+//          单周期 CPI=1 与其不兼容，故加 FETCH/EXEC/(MEM) 三态等待机。
+//          这正是拆五级流水后 MEM 读 / WB 用天然吻合的原因——本 FSM 是过渡脚手架。
+//  [NEW-4] debug_wb_* 改为"写回事件打一拍"的寄存器输出：
+//          tb 在写回时钟沿后 #1 采样，组合直通会错过事件。
+//  [FIX-1] 模板坑：ALU 例化 .alu_src1 误接 alu_src2 → 所有加法变 2*src2
+//  [FIX-2] 模板坑：gr_we 把 bl 也屏蔽了（bl 应写 r1）
+//  [FIX-3] 模板坑：final_result 未声明（隐式 1bit，写回全被截成 1 位）
+//  [FIX-4] 模板坑：debug_wb_rf_we 因 wen/we 拼写不一致始终无驱动（trace 失效）
+//  （alu.v 内另有 3 处坑，见 alu.v 中 FIX 注释）
+//-----------------------------------------------------------------------------
 module mycpu_top(
     input  wire        clk,
     input  wire        resetn,
     // inst sram interface
-    output wire        inst_sram_we,
+    output wire        inst_sram_en,     // NEW-1
+    output wire [ 3:0] inst_sram_we,     // NEW-2
     output wire [31:0] inst_sram_addr,
     output wire [31:0] inst_sram_wdata,
     input  wire [31:0] inst_sram_rdata,
     // data sram interface
-    output wire        data_sram_we,
+    output wire        data_sram_en,     // NEW-1
+    output wire [ 3:0] data_sram_we,     // NEW-2
     output wire [31:0] data_sram_addr,
     output wire [31:0] data_sram_wdata,
     input  wire [31:0] data_sram_rdata,
@@ -17,19 +37,36 @@ module mycpu_top(
     output wire [ 4:0] debug_wb_rf_wnum,
     output wire [31:0] debug_wb_rf_wdata
 );
-reg         reset;
+reg reset;
 always @(posedge clk) reset <= ~resetn;
 
-reg         valid;
+//=========================================================================
+// NEW-3: 三态等待机。FETCH 发地址，EXEC 拿指令执行；ld.w 多等一拍(MEM)拿数
+//=========================================================================
+localparam S_FETCH = 2'd0,
+           S_EXEC  = 2'd1,
+           S_MEM   = 2'd2;
+reg  [1:0] cur_st;
+wire in_fetch = (cur_st == S_FETCH);
+wire in_exec  = (cur_st == S_EXEC );
+wire in_mem   = (cur_st == S_MEM  );
+
+wire inst_ld_w;          //前向声明（译码段定义）
+wire retire = (in_exec && !inst_ld_w) || in_mem;   //本拍末写回/更新pc
+
 always @(posedge clk) begin
-    if (reset) begin
-        valid <= 1'b0;
-    end
-    else begin
-        valid <= 1'b1;
-    end
+    if (reset) cur_st <= S_FETCH;
+    else case (cur_st)
+        S_FETCH: cur_st <= S_EXEC;
+        S_EXEC : cur_st <= inst_ld_w ? S_MEM : S_FETCH;
+        S_MEM  : cur_st <= S_FETCH;
+        default: cur_st <= S_FETCH;
+    endcase
 end
 
+//=========================================================================
+// 取指
+//=========================================================================
 wire [31:0] seq_pc;
 wire [31:0] nextpc;
 wire        br_taken;
@@ -37,6 +74,23 @@ wire [31:0] br_target;
 wire [31:0] inst;
 reg  [31:0] pc;
 
+assign seq_pc = pc + 3'h4;
+assign nextpc = br_taken ? br_target : seq_pc;
+
+always @(posedge clk) begin
+    if (reset) pc <= 32'h1bfffffc;   //trick: 复位后首拍发出 0x1c000000 的访存请求
+    else if (retire) pc <= nextpc;
+end
+
+assign inst_sram_en    = in_fetch;             //NEW-1：仅在取指拍发读请求
+assign inst_sram_we    = 4'b0;                //NEW-2：指令侧从不写
+assign inst_sram_addr  = pc;
+assign inst_sram_wdata = 32'b0;
+assign inst            = inst_sram_rdata;     //EXEC 拍有效（寄存式 RAM）
+
+//=========================================================================
+// 译码（与模板一致）
+//=========================================================================
 wire [11:0] alu_op;
 wire        load_op;
 wire        src1_is_pc;
@@ -82,7 +136,6 @@ wire        inst_slli_w;
 wire        inst_srli_w;
 wire        inst_srai_w;
 wire        inst_addi_w;
-wire        inst_ld_w;
 wire        inst_st_w;
 wire        inst_jirl;
 wire        inst_b;
@@ -111,23 +164,7 @@ wire [31:0] alu_src2   ;
 wire [31:0] alu_result ;
 
 wire [31:0] mem_result;
-
-assign seq_pc       = pc + 3'h4;
-assign nextpc       = br_taken ? br_target : seq_pc;
-
-always @(posedge clk) begin
-    if (reset) begin
-        pc <= 32'h1bfffffc;     //trick: to make nextpc be 0x1c000000 during reset 
-    end
-    else begin
-        pc <= nextpc;
-    end
-end
-
-assign inst_sram_we    = 1'b0;
-assign inst_sram_addr  = pc;
-assign inst_sram_wdata = 32'b0;
-assign inst            = inst_sram_rdata;
+wire [31:0] final_result;                 //FIX-3：模板漏声明，隐式1bit
 
 assign op_31_26  = inst[31:26];
 assign op_25_22  = inst[25:22];
@@ -200,27 +237,20 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
 assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w;
-
 assign src1_is_pc    = inst_jirl | inst_bl;
-
-assign src2_is_imm   = inst_slli_w |
-                       inst_srli_w |
-                       inst_srai_w |
-                       inst_addi_w |
-                       inst_ld_w   |
-                       inst_st_w   |
-                       inst_lu12i_w|
-                       inst_jirl   |
-                       inst_bl     ;
+assign src2_is_imm   = inst_slli_w | inst_srli_w | inst_srai_w |
+                       inst_addi_w | inst_ld_w   | inst_st_w   |
+                       inst_lu12i_w| inst_jirl   | inst_bl     ;
 
 assign res_from_mem  = inst_ld_w;
 assign dst_is_r1     = inst_bl;
-assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b & ~inst_bl;
+// FIX-2：模板把 ~inst_bl 也写进 gr_we，导致 bl 不写 r1（应为链接写回）
+assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
 assign mem_we        = inst_st_w;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
 
 assign rf_raddr1 = rj;
-assign rf_raddr2 = src_reg_is_rd ? rd :rk;
+assign rf_raddr2 = src_reg_is_rd ? rd : rk;
 regfile u_regfile(
     .clk    (clk      ),
     .raddr1 (rf_raddr1),
@@ -235,41 +265,64 @@ regfile u_regfile(
 assign rj_value  = rf_rdata1;
 assign rkd_value = rf_rdata2;
 
-assign rj_eq_rd = (rj_value == rkd_value);
-assign br_taken = (   inst_beq  &&  rj_eq_rd
+// 分支：仅 EXEC 拍判定（NEW-3 的 in_exec 取代模板的 valid）
+assign rj_eq_rd  = (rj_value == rkd_value);
+assign br_taken  = (   inst_beq  &&  rj_eq_rd
                    || inst_bne  && !rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
-                  ) && valid;
+                  ) && in_exec;
 assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc + br_offs) :
                                                    /*inst_jirl*/ (rj_value + jirl_offs);
 
-assign alu_src1 = src1_is_pc  ? pc[31:0] : rj_value;
-assign alu_src2 = src2_is_imm ? imm : rkd_value;
+assign alu_src1 = src1_is_pc  ? pc       : rj_value;
+assign alu_src2 = src2_is_imm ? imm      : rkd_value;
 
 alu u_alu(
     .alu_op     (alu_op    ),
-    .alu_src1   (alu_src2  ),
+    .alu_src1   (alu_src1  ),   // FIX-1：模板误接 alu_src2
     .alu_src2   (alu_src2  ),
     .alu_result (alu_result)
     );
 
-assign data_sram_we    = mem_we && valid;
+//=========================================================================
+// 访存（NEW-1/2/3）：EXEC 拍发请求；ld 数据在 MEM 拍被写回级取走；
+//                      st 在 EXEC→下一拍边沿写入 BRAM（en/we 只有效一拍的请求窗）
+//=========================================================================
+assign data_sram_en    = in_exec && (inst_ld_w || inst_st_w);
+assign data_sram_we    = {4{in_exec && inst_st_w}};        //NEW-2：st.w 全字
 assign data_sram_addr  = alu_result;
 assign data_sram_wdata = rkd_value;
 
 assign mem_result   = data_sram_rdata;
 assign final_result = res_from_mem ? mem_result : alu_result;
 
-assign rf_we    = gr_we && valid;
+assign rf_we    = gr_we  && retire;
 assign rf_waddr = dest;
 assign rf_wdata = final_result;
 
-// debug info generate
-assign debug_wb_pc       = pc;
-assign debug_wb_rf_wen   = {4{rf_we}};
-assign debug_wb_rf_wnum  = dest;
-assign debug_wb_rf_wdata = final_result;
+//=========================================================================
+// NEW-4: trace 事件打一拍输出（tb 在写回沿后 #1/#2 采样，组合直通会漏）
+//=========================================================================
+reg [31:0] dbg_pc_r;
+reg [ 3:0] dbg_we_r;
+reg [ 4:0] dbg_num_r;
+reg [31:0] dbg_data_r;
+always @(posedge clk) begin
+    if (retire) begin
+        dbg_pc_r    <= pc;
+        dbg_num_r   <= dest;
+        dbg_data_r  <= final_result;
+        dbg_we_r    <= gr_we ? 4'b1111 : 4'b0;   //st/branch 也算"事件但无写"
+    end
+    else begin
+        dbg_we_r    <= 4'b0;
+    end
+end
+assign debug_wb_pc       = dbg_pc_r;    // FIX-4：模板 we/wen 拼写不一致致此口无驱动
+assign debug_wb_rf_we    = dbg_we_r;
+assign debug_wb_rf_wnum  = dbg_num_r;
+assign debug_wb_rf_wdata = dbg_data_r;
 
 endmodule

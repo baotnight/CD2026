@@ -70,19 +70,24 @@ assign sltu_result[31:1] = 31'b0;
 assign sltu_result[0]    = ~adder_cout;
 
 // bitwise operation
+// FIX(模板坑2): 原版 or_result = src1|src2|alu_result 把输出反馈回输入（组合环），
+// 仿真中会振荡/出错值。按语义应为 src1|src2；nor 取反。
+assign or_result  = alu_src1 | alu_src2;
+assign nor_result = ~(alu_src1 | alu_src2);
 assign and_result = alu_src1 & alu_src2;
-assign or_result  = alu_src1 | alu_src2 | alu_result;
-assign nor_result = ~or_result;
 assign xor_result = alu_src1 ^ alu_src2;
 assign lui_result = alu_src2;
 
 // SLL result
-assign sll_result = alu_src2 << alu_src1[4:0];   //rj << i5
+// FIX(模板坑3): 顶层约定 alu_src1=数据(rj)、alu_src2=立即数(shamt)，
+// 原版写成 src2<<src1 方向颠倒（与 lui 用 src2=立即数矛盾，必有一错，以顶层语义为准）。
+assign sll_result = alu_src1 << alu_src2[4:0];   //rj << i5
 
 // SRL, SRA result
-assign sr64_result = {{32{op_sra & alu_src2[31]}}, alu_src2[31:0]} >> alu_src1[4:0]; //rj >> i5
+assign sr64_result = {{32{op_sra & alu_src1[31]}}, alu_src1[31:0]} >> alu_src2[4:0]; //rj >> i5
 
-assign sr_result   = sr64_result[30:0];
+// FIX(模板坑4): 原版取 sr64_result[30:0]，丢了符号位（sra 结果高位被填0）。
+assign sr_result   = sr64_result[31:0];
 
 // final result mux
 assign alu_result = ({32{op_add|op_sub}} & add_sub_result)

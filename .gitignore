@@ -12,6 +12,8 @@ loongarch32r-linux-gnusf-*.tar.gz
 obj/
 *.o
 convert
+*.bak
+~$*
 .Xil/
 *.runs/
 *.sim/

@@ -66,21 +66,19 @@ wire        exe_valid = id_ex_valid;
 wire        mem_valid = exe_mem_valid;
 
 //-------------------------------------------------------------------------
-// [EX2] 实验2-阻塞：ID 源寄存器与 EXE/MEM/WB 目的寄存器同号（均非 0 号）→ ID 停等。
-//   保守判定：rj 一律视为源（bl 虽不用 rj 也停，只是多停几拍，不影响正确性）；
-//   第二源 = src_reg_is_rd ? rd : rk（beq/bne/st.w 用 rd，其余用 rk）。
-//   写 0 号寄存器不构成相关（r0 恒零）。停顿时：IF/ID、pc 原地保持
-//   （if_allowin=0），ID/EXE 插入气泡（id_ex_valid<=0），老指令照常前进，无死锁。
-//   [EX3] 将被前递替代——load 之外的 RAW 全靠旁路，仅保留 load delay 停顿。
+// [EX3] 实验2-前递：用 EXE/MEM/WB 三级旁路替代 ex2 的阻塞（见 ID 级 rj_value/
+//   rkd_value 的前递 mux），停顿只保留 load delay 一种——load 在 EXE 级时结果
+//   尚未从 RAM 取回，其后紧邻使用的指令阻塞 1 拍（下一拍 load 进 MEM，数据经
+//   MEM→ID 旁路送达）。前递优先级 EXE > MEM > WB（ youngest 优先）。
+//   EXE 级旁路附带回灌条件 exe_ready_go：为后续多周期部件（ex7 除法）预留——
+//   结果未定型的指令不得旁路。
+//   停顿时：IF/ID、pc 原地保持（if_allowin=0），ID/EXE 插气泡，无死锁。
 //-------------------------------------------------------------------------
 wire [4:0] id_src2 = src_reg_is_rd ? rd : rk;
-wire id_stall_ex  = id_ex_valid  && id_ex_gr_we  && (id_ex_dest  != 5'd0)
-                    && (id_ex_dest  == rj || id_ex_dest  == id_src2);
-wire id_stall_mem = exe_mem_valid && exe_mem_gr_we && (exe_mem_dest != 5'd0)
-                    && (exe_mem_dest == rj || exe_mem_dest == id_src2);
-wire id_stall_wb  = mem_wb_valid  && mem_wb_gr_we  && (mem_wb_dest  != 5'd0)
-                    && (mem_wb_dest  == rj || mem_wb_dest  == id_src2);
-wire id_ready_go  = !(id_stall_ex | id_stall_mem | id_stall_wb);
+wire ld_in_exe = id_ex_valid && id_ex_res_from_mem && id_ex_gr_we
+                 && (id_ex_dest != 5'd0)
+                 && (id_ex_dest == rj || id_ex_dest == id_src2);
+wire id_ready_go  = !ld_in_exe;          //load delay：仅此一种停顿
 wire exe_ready_go = 1'b1;
 wire mem_ready_go = 1'b1;        //BRAM 读数 EXE 发起、MEM 到达，MEM 无需等待
 
@@ -280,8 +278,26 @@ assign dest          = dst_is_r1 ? 5'd1 : rd;
 assign rf_raddr1 = rj;
 assign rf_raddr2 = src_reg_is_rd ? rd : rk;
 
-wire [31:0] rj_value  = rf_rdata1;
-wire [31:0] rkd_value = rf_rdata2;
+//-------------------------------------------------------------------------
+// [EX3] 前递 mux：三级旁路回灌 ID 操作数，优先级 EXE > MEM > WB。
+//   EXE 级：旁路 exe_alu_result（load 在 EXE 时未取回，由 load delay 停顿兜住；
+//           exe_ready_go=0 的多周期部件结果未定型，不旁路）。
+//   MEM 级：旁路 mem_final_result（load 的 BRAM 读数在本拍已有效，可直旁）。
+//   WB  级：旁路 mem_wb_result（否则同拍 WB 写/ID 读会读到旧值）。
+//   0 号寄存器恒零，不参与前递；不命中任何旁路则用寄存器堆读出值。
+//-------------------------------------------------------------------------
+wire fw_exe_ok = id_ex_valid   && id_ex_gr_we   && (id_ex_dest   != 5'd0) && exe_ready_go;
+wire fw_mem_ok = exe_mem_valid && exe_mem_gr_we && (exe_mem_dest != 5'd0);
+wire fw_wb_ok  = mem_wb_valid  && mem_wb_gr_we  && (mem_wb_dest  != 5'd0);
+
+wire [31:0] rj_value = (fw_exe_ok && id_ex_dest == rj)   ? exe_alu_result   :
+                       (fw_mem_ok && exe_mem_dest == rj) ? mem_final_result :
+                       (fw_wb_ok  && mem_wb_dest  == rj) ? mem_wb_result    :
+                                                           rf_rdata1;
+wire [31:0] rkd_value= (fw_exe_ok && id_ex_dest == id_src2)   ? exe_alu_result   :
+                       (fw_mem_ok && exe_mem_dest == id_src2) ? mem_final_result :
+                       (fw_wb_ok  && mem_wb_dest  == id_src2) ? mem_wb_result    :
+                                                                rf_rdata2;
 
 //-------------------------------------------------------------------------
 // 转移判定放在 ID [PIPE-1][PIPE-3]：

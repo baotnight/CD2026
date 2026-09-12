@@ -79,7 +79,6 @@ wire ld_in_exe = id_ex_valid && id_ex_res_from_mem && id_ex_gr_we
                  && (id_ex_dest != 5'd0)
                  && (id_ex_dest == rj || id_ex_dest == id_src2);
 wire id_ready_go  = !ld_in_exe;          //load delay：仅此一种停顿
-wire exe_ready_go = 1'b1;
 wire mem_ready_go = 1'b1;        //BRAM 读数 EXE 发起、MEM 到达，MEM 无需等待
 
 wire        wb_allowin  = 1'b1;         //WB 每拍必然写完
@@ -196,6 +195,13 @@ wire        inst_sll_w;
 wire        inst_srl_w;
 wire        inst_sra_w;
 wire        inst_pcaddu12i;
+wire        inst_mul_w;
+wire        inst_mulh_w;
+wire        inst_mulh_wu;
+wire        inst_div_w;
+wire        inst_mod_w;
+wire        inst_div_wu;
+wire        inst_mod_wu;
 
 wire        need_ui5;
 wire        need_si12;
@@ -252,6 +258,13 @@ assign inst_ld_bu  = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
 assign inst_ld_hu  = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
 assign inst_st_b   = op_31_26_d[6'h0a] & op_25_22_d[4'h4];
 assign inst_st_h   = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
+assign inst_mul_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h18];
+assign inst_mulh_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h19];
+assign inst_mulh_wu = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h1a];
+assign inst_div_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h00];
+assign inst_mod_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h01];
+assign inst_div_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
+assign inst_mod_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
 wire inst_load     = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
 wire inst_store    = inst_st_w | inst_st_b | inst_st_h;
 wire load_signed   = inst_ld_w | inst_ld_b | inst_ld_h;   //bu/hu 零扩展
@@ -278,6 +291,9 @@ assign inst_sll_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & o
 assign inst_srl_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0f];
 assign inst_sra_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h10];
 assign inst_pcaddu12i = op_31_26_d[6'h07] & ~inst[25];
+// [EX7] 实验5乘除指令：mul 家族 op_21_20=01+funct 0x18..0x1a，div 家族 op_21_20=10+funct 0x00..0x03
+wire inst_muldiv = inst_mul_w | inst_mulh_w | inst_mulh_wu
+                 | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu;
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_load | inst_store
                     | inst_jirl | inst_bl | inst_pcaddu12i;
@@ -343,11 +359,11 @@ wire fw_exe_ok = id_ex_valid   && id_ex_gr_we   && (id_ex_dest   != 5'd0) && exe
 wire fw_mem_ok = exe_mem_valid && exe_mem_gr_we && (exe_mem_dest != 5'd0);
 wire fw_wb_ok  = mem_wb_valid  && mem_wb_gr_we  && (mem_wb_dest  != 5'd0);
 
-wire [31:0] rj_value = (fw_exe_ok && id_ex_dest == rj)   ? exe_alu_result   :
+wire [31:0] rj_value = (fw_exe_ok && id_ex_dest == rj)   ? exe_final_result :
                        (fw_mem_ok && exe_mem_dest == rj) ? mem_final_result :
                        (fw_wb_ok  && mem_wb_dest  == rj) ? mem_wb_result    :
                                                            rf_rdata1;
-wire [31:0] rkd_value= (fw_exe_ok && id_ex_dest == id_src2)   ? exe_alu_result   :
+wire [31:0] rkd_value= (fw_exe_ok && id_ex_dest == id_src2)   ? exe_final_result :
                        (fw_mem_ok && exe_mem_dest == id_src2) ? mem_final_result :
                        (fw_wb_ok  && mem_wb_dest  == id_src2) ? mem_wb_result    :
                                                                 rf_rdata2;
@@ -393,6 +409,7 @@ reg         id_ex_st_b;        //[EX6] store 宽度（st_w 为默认）
 reg         id_ex_st_h;
 reg         id_ex_load_signed; //[EX6] load 符号扩展/零扩展
 reg  [ 1:0] id_ex_load_size;   //[EX6] 00=b 01=h 10=w
+reg  [ 2:0] id_ex_md_op;       //[EX7] muldiv 操作码（0=无）
 
 always @(posedge clk) begin
     if (reset) begin
@@ -415,6 +432,10 @@ always @(posedge clk) begin
         id_ex_st_h         <= inst_st_h;
         id_ex_load_signed  <= load_signed;
         id_ex_load_size    <= {inst_ld_w, inst_ld_h | inst_ld_hu};
+        id_ex_md_op        <= inst_mul_w  ? 3'd0 : inst_mulh_w  ? 3'd1 :
+                              inst_mulh_wu? 3'd2 : inst_div_w   ? 3'd3 :
+                              inst_mod_w  ? 3'd4 : inst_div_wu  ? 3'd5 :
+                              inst_mod_wu ? 3'd6 : 3'd7;
     end
 end
 
@@ -432,6 +453,25 @@ alu u_alu(
     .alu_result (exe_alu_result)
 );
 
+// [EX7] 乘除单元：EXE 级多周期，ready_go 等 done；ack=指令离场拍
+wire       md_start = (id_ex_md_op != 3'd7) && !md_ack;   //离场拍不发起（新指令下一拍才发起）
+wire       md_done;
+wire [31:0] md_result;
+wire       md_ack;
+assign exe_ready_go = (id_ex_md_op == 3'd7) || md_done;
+// [EX7] EXE 级统一结果：muldiv 指令取 md_result，其余取 ALU（前递与写回共用）
+wire [31:0] exe_final_result = (id_ex_md_op != 3'd7) ? md_result : exe_alu_result;
+muldiv u_muldiv(
+    .clk    (clk        ),
+    .reset  (reset      ),
+    .start  (md_start   ),
+    .ack    (md_ack     ),
+    .op     (id_ex_md_op),
+    .a      (id_ex_rj_value),
+    .b      (id_ex_rkd_value),
+    .result (md_result  ),
+    .done   (md_done    )
+);
 // 数据访存请求在 EXE 发出；BRAM 寄存式读下一拍（MEM）出数 [PIPE-1]
 // valid 门控：气泡不得访存（其控制位来自垃圾指令的 X，必须挡住）
 assign data_sram_en    = id_ex_valid && (id_ex_res_from_mem | id_ex_mem_we);
@@ -465,7 +505,7 @@ always @(posedge clk) begin
     end else if (mem_allowin) begin
         exe_mem_valid        <= id_ex_valid && exe_ready_go;
         exe_mem_pc           <= id_ex_pc;
-        exe_mem_alu_result   <= exe_alu_result;
+        exe_mem_alu_result   <= exe_final_result;   //[EX7] muldiv 指令为 md_result
         exe_mem_res_from_mem <= id_ex_res_from_mem;
         exe_mem_gr_we        <= id_ex_gr_we;
         exe_mem_dest         <= id_ex_dest;
@@ -473,6 +513,7 @@ always @(posedge clk) begin
         exe_mem_load_size    <= id_ex_load_size;
     end
 end
+assign md_ack = mem_allowin && exe_ready_go;   //[EX7] 指令离开 EXE 的时钟拍
 
 //=========================================================================
 // MEM 级：选定写回值（ld 的 BRAM 读数本拍有效）[PIPE-1]

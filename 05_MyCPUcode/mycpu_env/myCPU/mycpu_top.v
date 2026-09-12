@@ -95,9 +95,11 @@ wire        id_br_taken;                //来自 ID 级（前向引用，见译�
 wire [31:0] id_br_target;
 wire [31:0] seq_pc = pc + 3'h4;
 // [EX8] EXE 级异常重定向优先于 ID 转移（EXE 指令更老；ID/IF 里的都是 young，会被冲刷）
-wire [31:0] nextpc = exe_redirect ? (exe_syscall ? csr_eentry : csr_era)
+wire [31:0] nextpc = exe_redirect ? (exe_ertn ? csr_era : csr_eentry)
+                                  : if_adef     ? csr_eentry            //[EX9] ADEF
                                   : id_br_taken ? id_br_target : seq_pc;
 wire        fetch_is_dummy = (pc == 32'h1bfffffc);   //[PIPE-4] 复位假取指
+wire        if_adef = !reset && (pc[1:0] != 2'b00);  //[EX9] 取指地址错（pc 非字对齐）
 
 always @(posedge clk) begin
     if (reset)           pc <= 32'h1bfffffc;   //trick：复位后首拍发出 0x1c000000 之前的假请求
@@ -119,7 +121,7 @@ always @(posedge clk) begin
         if_id_valid <= 1'b0;
         if_id_pc    <= 32'b0;
     end else if (if_allowin) begin
-        if_id_valid <= !fetch_is_dummy && !id_br_taken && !exe_redirect;  //[PIPE-3][PIPE-4][EX8]
+        if_id_valid <= !fetch_is_dummy && !id_br_taken && !exe_redirect && !if_adef;  //[PIPE-3][PIPE-4][EX8][EX9]
         if_id_pc    <= pc;
     end
 end
@@ -210,6 +212,11 @@ wire        inst_csrwr;
 wire        inst_csrxchg;
 wire        inst_syscall;
 wire        inst_ertn;
+wire        inst_break;      //[EX9]
+wire        inst_rdcntid;    //[EX9] 写 rj 槽位寄存器
+wire        inst_rdcntvl;    //[EX9]
+wire        inst_rdcntvh;    //[EX9]
+wire        inst_known;      //[EX9] INE 判定用
 
 wire        need_ui5;
 wire        need_si12;
@@ -309,6 +316,24 @@ assign inst_csrrd    = inst_csr & (rj == 5'd0);
 assign inst_csrwr    = inst_csr & (rj == 5'd1);
 assign inst_csrxchg  = inst_csr & (rj != 5'd0) & (rj != 5'd1);
 assign inst_syscall  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16];
+// [EX9] break：与 syscall 同族 funct=0x14（ex9_obj 反汇编核对）
+assign inst_break    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h14];
+// [EX9] rdcnt 族：opcode 全 0 + inst[14:10]=11000/11001；rdcntid 的目的寄存器在 rj 槽位
+wire inst_rdcnt_base  = ~|op_31_26 & ~|op_25_22 & ~|op_21_20 & ~|op_19_15;
+wire inst_rdcnt_funct = (inst[14:10] == 5'h18) | (inst[14:10] == 5'h19);
+// [EX9] 已实现指令的总或——不在其中的合法取指指令触发 INE
+assign inst_known = inst_add_w|inst_sub_w|inst_slt|inst_sltu|inst_nor|inst_and
+                  | inst_or|inst_xor|inst_slli_w|inst_srli_w|inst_srai_w
+                  | inst_addi_w|inst_load|inst_store|inst_jirl|inst_b|inst_bl
+                  | inst_beq|inst_bne|inst_blt|inst_bge|inst_bltu|inst_bgeu
+                  | inst_lu12i_w|inst_slti|inst_sltui|inst_andi|inst_ori|inst_xori
+                  | inst_sll_w|inst_srl_w|inst_sra_w|inst_pcaddu12i|inst_muldiv
+                  | inst_csr|inst_syscall|inst_ertn|inst_break
+                  | (inst_rdcnt_base & inst_rdcnt_funct);
+wire id_ine = if_id_valid && !inst_known && !id_br_taken;   //[EX9] 指令不存在
+assign inst_rdcntvl  = inst_rdcnt_base & (inst[14:10] == 5'h18) & (rj == 5'd0);
+assign inst_rdcntvh  = inst_rdcnt_base & (inst[14:10] == 5'h19);
+assign inst_rdcntid  = inst_rdcnt_base & (inst[14:10] == 5'h18) & (rj != 5'd0);
 assign inst_ertn     = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10];
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_load | inst_store
@@ -360,7 +385,7 @@ assign gr_we         = ~inst_store & ~inst_beq & ~inst_bne & ~inst_b
                        & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu
                        & ~inst_syscall & ~inst_ertn;                   //[EX8]
 assign mem_we        = inst_store;
-assign dest          = dst_is_r1 ? 5'd1 : rd;
+assign dest          = inst_rdcntid ? rj : (dst_is_r1 ? 5'd1 : rd);  //[EX9]
 
 assign rf_raddr1 = rj;
 assign rf_raddr2 = src_reg_is_rd ? rd : rk;
@@ -373,7 +398,8 @@ assign rf_raddr2 = src_reg_is_rd ? rd : rk;
 //   WB  级：旁路 mem_wb_result（否则同拍 WB 写/ID 读会读到旧值）。
 //   0 号寄存器恒零，不参与前递；不命中任何旁路则用寄存器堆读出值。
 //-------------------------------------------------------------------------
-wire fw_exe_ok = id_ex_valid   && id_ex_gr_we   && (id_ex_dest   != 5'd0) && exe_ready_go;
+wire fw_exe_ok = id_ex_valid   && id_ex_gr_we   && !exe_sync                 //[EX9] 异常指令不前递
+                              && (id_ex_dest   != 5'd0) && exe_ready_go;
 wire fw_mem_ok = exe_mem_valid && exe_mem_gr_we && (exe_mem_dest != 5'd0);
 wire fw_wb_ok  = mem_wb_valid  && mem_wb_gr_we  && (mem_wb_dest  != 5'd0);
 
@@ -431,6 +457,8 @@ reg  [ 2:0] id_ex_md_op;       //[EX7] muldiv 操作码（0=无）
 reg  [13:0] id_ex_csr_addr;    //[EX8]
 reg         id_ex_csrwr, id_ex_csrxchg, id_ex_syscall, id_ex_ertn;
 reg         id_ex_csrrd_flg;
+reg         id_ex_break, id_ex_ine;    //[EX9]
+reg  [ 2:0] id_ex_rdcnt;               //[EX9] 0无 1=vl 2=vh 4=id(rdcntid)
 
 always @(posedge clk) begin
     if (reset) begin
@@ -461,6 +489,9 @@ always @(posedge clk) begin
         id_ex_csrwr        <= inst_csrwr;
         id_ex_csrxchg      <= inst_csrxchg;
         id_ex_csrrd_flg    <= inst_csrrd;
+        id_ex_break        <= inst_break;
+        id_ex_ine          <= id_ine;
+        id_ex_rdcnt        <= {inst_rdcntid, inst_rdcntvh, inst_rdcntvl};
         id_ex_syscall      <= inst_syscall;
         id_ex_ertn         <= inst_ertn;
     end
@@ -486,9 +517,40 @@ alu u_alu(
 //   CSR 译码只按低 7 位索引（用到的 0,1,4,5,6,7,c,30-33,40-44 低 7 位互不冲突）
 //-------------------------------------------------------------------------
 reg [31:0] csr_file [0:127];
+// [EX9] 稳定计数器（每拍 +1，rdcntvl/vh 读取）与定时器（TCFG/TVAL/IS[11]）
+reg [63:0] stable_cnt;
+reg        tcfg_en, tcfg_per;
+reg [31:0] tval_r;
+reg        estat_is11;
+wire       tcfg_wr  = csr_we && (exe_csr_index == 7'd65);   //0x41
+wire       ticlr_wr = csr_we && (exe_csr_index == 7'd68) && csr_new[0]; //0x44 清 IS[11]
+always @(posedge clk) begin
+    if (reset) begin
+        stable_cnt <= 64'd0;  tcfg_en <= 1'b0;  tcfg_per <= 1'b0;
+        tval_r     <= 32'd0;  estat_is11 <= 1'b0;
+    end else begin
+        stable_cnt <= stable_cnt + 64'd1;
+        if (tcfg_wr) begin
+            tcfg_en  <= csr_new[0];
+            tcfg_per <= csr_new[1];
+            tval_r   <= {csr_new[31:7], 7'b0};   //TVAL 装载 InitVal<<7（计数单位=128 周期）
+        end else if (tcfg_en) begin
+            if (tval_r <= 32'd1) begin
+                tval_r     <= tcfg_per ? {csr_file[7'd65][31:7], 7'b0} : 32'b0;
+                if (!tcfg_per) tcfg_en <= 1'b0;  //单次计数结束即停
+                estat_is11 <= 1'b1;              //定时器中断挂起
+            end else tval_r <= tval_r - 32'd1;
+        end
+        if (ticlr_wr) estat_is11 <= 1'b0;
+    end
+end
 wire [13:0] exe_csr_addr  = id_ex_csr_addr;
 wire [ 6:0] exe_csr_index = id_ex_csr_addr[6:0];
-wire [31:0] csr_rdata     = csr_file[exe_csr_index];
+wire [31:0] csr_rdata     = (exe_csr_index == 7'd66) ? tval_r :        //[EX9] TVAL
+                            (exe_csr_index == 7'd68) ? 32'b0 :        //[EX9] TICLR 写清除型，读恒 0
+                            (exe_csr_index == 7'd4 ) ? ecfg_val       //[EX9] LIE[10] 保留读 0
+                            : (exe_csr_index == 7'd5 ) ? estat_val    //[EX9] ESTAT 含 IS[11]
+                                                     : csr_file[exe_csr_index];
 wire [31:0] csr_crmd      = csr_file[7'd0];
 wire [31:0] csr_prmd      = csr_file[7'd1];
 wire [31:0] csr_era       = csr_file[7'd6];
@@ -496,7 +558,26 @@ wire [31:0] csr_eentry    = csr_file[7'd12];
 
 wire        exe_syscall  = id_ex_valid && id_ex_syscall;
 wire        exe_ertn     = id_ex_valid && id_ex_ertn;
-wire        exe_redirect = exe_syscall | exe_ertn;
+// [EX9] 同步异常扩展：BRK/INE/ALE + 异步中断
+wire        exe_brk      = id_ex_valid && id_ex_break;
+wire        exe_ine      = id_ex_valid && id_ex_ine;
+wire [31:0] exe_maddr    = exe_alu_result;                       //访存地址
+wire        exe_ale      = id_ex_valid && (id_ex_mem_we | id_ex_res_from_mem) &&
+    (id_ex_res_from_mem ? (id_ex_load_size[1] ? (|exe_maddr[1:0])             //ld.w
+                          : (id_ex_load_size[0] ?  exe_maddr[0] : 1'b0))      //ld.h / ld.b
+                        : (id_ex_st_b ? 1'b0                                  //st.b 恒对齐
+                          : id_ex_st_h ? exe_maddr[0]                         //st.h
+                                       : (|exe_maddr[1:0])));                 //st.w
+wire [31:0] estat_val    = (csr_file[7'd5] & ~32'h800) | (estat_is11 << 11);  //[EX9] TI=IS[11]
+wire [31:0] ecfg_val     = csr_file[7'd4] & ~32'h400;   //[EX9] LIE[10] 保留位：读 0 写忽略
+wire [12:0] int_lines    = estat_val[12:0] & ecfg_val[12:0];            //IS & LIE
+wire        int_pending  = |int_lines;
+wire        exe_int      = id_ex_valid && csr_file[7'd0][2] && int_pending
+                         && !exe_syscall && !exe_ertn && !exe_brk && !exe_ine && !exe_ale;
+wire        exe_sync     = exe_syscall | exe_brk | exe_ine | exe_ale;   //同步异常：指令不生效
+wire        exe_redirect = exe_syscall | exe_ertn | exe_brk | exe_ine | exe_ale | exe_int;
+wire [5:0]  exe_ecode    = exe_syscall ? 6'h0b : exe_brk ? 6'h0c : exe_ine ? 6'h0d :
+                            exe_ale ? 6'h09 : 6'h00;                    //中断 Ecode=0；非对齐访存=ADEM(9)
 
 wire        csr_we       = id_ex_valid && (id_ex_csrwr | id_ex_csrxchg);
 wire [31:0] csr_old      = csr_rdata;
@@ -519,17 +600,37 @@ always @(posedge clk) begin
         csr_file[7'd68]<= 32'b0;                 //TICLR (0x44)
     end else begin
         // CSR 读改写指令（csrrd 不写）
-        if (csr_we) csr_file[exe_csr_index] <= csr_new;
-        // syscall：ERA=本指令 pc，ESTAT.Ecode=0xb，保存现场到 PRMD，特权级/中断关
-        if (exe_syscall) begin
+        // [EX9] ESTAT 只有 IS[1:0]（软件中断）软件可写，Ecode/IS[11] 属硬件
+        if (csr_we && exe_csr_index == 7'd5)
+            csr_file[7'd5] <= (csr_file[7'd5] & ~32'h3) | (csr_new & 32'h3);
+        else if (csr_we) csr_file[exe_csr_index] <= csr_new;
+        // [EX8/EX9] 异常入口：ERA=本指令 pc（软件 +4 跳过），Ecode，PRMD 保存现场，
+        //           CRMD.PLV/IE 清零；ALE 另记 BADV=出错访存地址
+        if (exe_sync) begin
             csr_file[7'd6] <= id_ex_pc;
-            csr_file[7'd5] <= (csr_file[7'd5] & ~32'h003f0000) | 32'h000b0000;
+            csr_file[7'd5] <= (csr_file[7'd5] & ~32'h003f0000) | (exe_ecode << 16);
             csr_file[7'd1] <= {29'b0, csr_crmd[2], csr_crmd[1:0]};   //PIE/PPLV
             csr_file[7'd0] <= (csr_crmd & ~32'h7) ;                  //PLV=0, IE=0
+            if (exe_ale) csr_file[7'd7] <= exe_maddr;                //BADV
+        end
+        // [EX9] 中断与同步异常同路径：ERA=被中断指令 pc，Ecode=0
+        if (exe_int) begin
+            csr_file[7'd6] <= id_ex_pc;
+            csr_file[7'd5] <= csr_file[7'd5] & ~32'h003f0000;        //Ecode=0
+            csr_file[7'd1] <= {29'b0, csr_crmd[2], csr_crmd[1:0]};
+            csr_file[7'd0] <= (csr_crmd & ~32'h7);
         end
         // ertn：回 ERA，从 PRMD 恢复 PLV/IE
         if (exe_ertn) begin
             csr_file[7'd0] <= {csr_crmd[31:3], csr_prmd[2], csr_prmd[1:0]};
+        end
+        // [EX9] ADEF：ERA=BADV=错误取指 pc，Ecode=8（老指令的 EXE 重定向优先）
+        if (if_adef && !exe_redirect) begin
+            csr_file[7'd6] <= pc;
+            csr_file[7'd7] <= pc;
+            csr_file[7'd5] <= (csr_file[7'd5] & ~32'h003f0000) | (6'h08 << 16);
+            csr_file[7'd1] <= {29'b0, csr_crmd[2], csr_crmd[1:0]};
+            csr_file[7'd0] <= (csr_crmd & ~32'h7);
         end
     end
 end
@@ -542,9 +643,13 @@ wire       md_ack;
 assign exe_ready_go = (id_ex_md_op == 3'd7) || md_done;
 // [EX7] EXE 级统一结果：muldiv 指令取 md_result，CSR 指令取旧值（写回 rd），其余取 ALU
 wire       id_ex_csr_op  = id_ex_csrrd_flg | id_ex_csrwr | id_ex_csrxchg;
+wire [31:0] exe_rdcnt_val = (id_ex_rdcnt == 2'd1) ? stable_cnt[31:0]  :  //[EX9] rdcntvl
+                            (id_ex_rdcnt == 2'd2) ? stable_cnt[63:32] :  //[EX9] rdcntvh
+                                                    csr_file[7'd64];     //[EX9] rdcntid=TID
 wire [31:0] exe_final_result = (id_ex_md_op != 3'd7) ? md_result :
-                               id_ex_csr_op           ? csr_old        :
-                                                        exe_alu_result;
+                               id_ex_csr_op          ? csr_old        :
+                               (id_ex_rdcnt != 2'd0) ? exe_rdcnt_val :
+                                                       exe_alu_result;
 muldiv u_muldiv(
     .clk    (clk        ),
     .reset  (reset      ),
@@ -558,7 +663,7 @@ muldiv u_muldiv(
 );
 // 数据访存请求在 EXE 发出；BRAM 寄存式读下一拍（MEM）出数 [PIPE-1]
 // valid 门控：气泡不得访存（其控制位来自垃圾指令的 X，必须挡住）
-assign data_sram_en    = id_ex_valid && (id_ex_res_from_mem | id_ex_mem_we);
+assign data_sram_en    = id_ex_valid && (id_ex_res_from_mem | id_ex_mem_we) && !exe_ale;  //[EX9]
 // [EX6] 字节写使能按 vaddr 低两位生成；写数据按宽度复制到各字节道
 wire [1:0] exe_vaddr_lo = exe_alu_result[1:0];
 wire [3:0] exe_data_we  = id_ex_st_b ? (4'b0001 << exe_vaddr_lo) :
@@ -567,7 +672,7 @@ wire [3:0] exe_data_we  = id_ex_st_b ? (4'b0001 << exe_vaddr_lo) :
 wire [31:0] exe_store_data = id_ex_st_b ? {4{id_ex_rkd_value[ 7:0]}} :
                              id_ex_st_h ? {2{id_ex_rkd_value[15:0]}} :
                                           id_ex_rkd_value;
-assign data_sram_we    = id_ex_valid && id_ex_mem_we ? exe_data_we : 4'b0;
+assign data_sram_we    = (id_ex_valid && id_ex_mem_we && !exe_ale) ? exe_data_we : 4'b0;  //[EX9]
 assign data_sram_addr  = exe_alu_result;
 assign data_sram_wdata = exe_store_data;
 
@@ -591,7 +696,7 @@ always @(posedge clk) begin
         exe_mem_pc           <= id_ex_pc;
         exe_mem_alu_result   <= exe_final_result;   //[EX7] muldiv 指令为 md_result
         exe_mem_res_from_mem <= id_ex_res_from_mem;
-        exe_mem_gr_we        <= id_ex_gr_we;
+        exe_mem_gr_we        <= id_ex_gr_we && !exe_sync;   //[EX9] 异常指令不写回
         exe_mem_dest         <= id_ex_dest;
         exe_mem_load_signed  <= id_ex_load_signed;
         exe_mem_load_size    <= id_ex_load_size;

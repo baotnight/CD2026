@@ -94,7 +94,9 @@ reg  [31:0] pc;
 wire        id_br_taken;                //来自 ID 级（前向引用，见译码段）
 wire [31:0] id_br_target;
 wire [31:0] seq_pc = pc + 3'h4;
-wire [31:0] nextpc = id_br_taken ? id_br_target : seq_pc;
+// [EX8] EXE 级异常重定向优先于 ID 转移（EXE 指令更老；ID/IF 里的都是 young，会被冲刷）
+wire [31:0] nextpc = exe_redirect ? (exe_syscall ? csr_eentry : csr_era)
+                                  : id_br_taken ? id_br_target : seq_pc;
 wire        fetch_is_dummy = (pc == 32'h1bfffffc);   //[PIPE-4] 复位假取指
 
 always @(posedge clk) begin
@@ -117,7 +119,7 @@ always @(posedge clk) begin
         if_id_valid <= 1'b0;
         if_id_pc    <= 32'b0;
     end else if (if_allowin) begin
-        if_id_valid <= !fetch_is_dummy && !id_br_taken;  //[PIPE-3][PIPE-4]
+        if_id_valid <= !fetch_is_dummy && !id_br_taken && !exe_redirect;  //[PIPE-3][PIPE-4][EX8]
         if_id_pc    <= pc;
     end
 end
@@ -202,6 +204,12 @@ wire        inst_div_w;
 wire        inst_mod_w;
 wire        inst_div_wu;
 wire        inst_mod_wu;
+wire        inst_csr;        //[EX8] inst[31:24]==00000100（csr 地址在 inst[23:10]）
+wire        inst_csrrd;
+wire        inst_csrwr;
+wire        inst_csrxchg;
+wire        inst_syscall;
+wire        inst_ertn;
 
 wire        need_ui5;
 wire        need_si12;
@@ -294,6 +302,14 @@ assign inst_pcaddu12i = op_31_26_d[6'h07] & ~inst[25];
 // [EX7] 实验5乘除指令：mul 家族 op_21_20=01+funct 0x18..0x1a，div 家族 op_21_20=10+funct 0x00..0x03
 wire inst_muldiv = inst_mul_w | inst_mulh_w | inst_mulh_wu
                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu;
+// [EX8] CSR/异常指令（编码核对自 ex8_obj 反汇编）
+//   CSR 族：inst[31:24]=00000100，inst[23:10]=CSR 号；rj 字段区分 0=csrrd 1=csrwr 其它=csrxchg
+assign inst_csr      = op_31_26_d[6'h01] & ~inst[25] & ~inst[24];  //inst[31:24]==8'h04
+assign inst_csrrd    = inst_csr & (rj == 5'd0);
+assign inst_csrwr    = inst_csr & (rj == 5'd1);
+assign inst_csrxchg  = inst_csr & (rj != 5'd0) & (rj != 5'd1);
+assign inst_syscall  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16];
+assign inst_ertn     = op_31_26_d[6'h01] & op_25_22_d[4'h9] & op_21_20_d[2'h0] & op_19_15_d[5'h10];
 
 assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_load | inst_store
                     | inst_jirl | inst_bl | inst_pcaddu12i;
@@ -329,7 +345,8 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
 assign src_reg_is_rd = inst_beq | inst_bne | inst_store
-                     | inst_blt | inst_bge | inst_bltu | inst_bgeu;   //[EX5]
+                     | inst_blt | inst_bge | inst_bltu | inst_bgeu
+                     | inst_csr;                                      //[EX8] csrwr/csrxchg 需要 gr[rd]
 assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 assign src2_is_imm   = inst_slli_w | inst_srli_w | inst_srai_w |
                        inst_addi_w | inst_load   | inst_store  |
@@ -340,7 +357,8 @@ assign src2_is_imm   = inst_slli_w | inst_srli_w | inst_srai_w |
 assign res_from_mem  = inst_load;
 assign dst_is_r1     = inst_bl;
 assign gr_we         = ~inst_store & ~inst_beq & ~inst_bne & ~inst_b
-                       & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;  //[EX5]
+                       & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu
+                       & ~inst_syscall & ~inst_ertn;                   //[EX8]
 assign mem_we        = inst_store;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
 
@@ -410,13 +428,16 @@ reg         id_ex_st_h;
 reg         id_ex_load_signed; //[EX6] load 符号扩展/零扩展
 reg  [ 1:0] id_ex_load_size;   //[EX6] 00=b 01=h 10=w
 reg  [ 2:0] id_ex_md_op;       //[EX7] muldiv 操作码（0=无）
+reg  [13:0] id_ex_csr_addr;    //[EX8]
+reg         id_ex_csrwr, id_ex_csrxchg, id_ex_syscall, id_ex_ertn;
+reg         id_ex_csrrd_flg;
 
 always @(posedge clk) begin
     if (reset) begin
         id_ex_valid <= 1'b0;
         id_ex_pc    <= 32'b0;
     end else if (exe_allowin) begin
-        id_ex_valid        <= if_id_valid && id_ready_go;
+        id_ex_valid        <= if_id_valid && id_ready_go && !exe_redirect;  //[EX8] 冲刷 young
         id_ex_pc           <= if_id_pc;
         id_ex_alu_op       <= alu_op;
         id_ex_src1_is_pc   <= src1_is_pc;
@@ -436,6 +457,12 @@ always @(posedge clk) begin
                               inst_mulh_wu? 3'd2 : inst_div_w   ? 3'd3 :
                               inst_mod_w  ? 3'd4 : inst_div_wu  ? 3'd5 :
                               inst_mod_wu ? 3'd6 : 3'd7;
+        id_ex_csr_addr     <= inst[23:10];
+        id_ex_csrwr        <= inst_csrwr;
+        id_ex_csrxchg      <= inst_csrxchg;
+        id_ex_csrrd_flg    <= inst_csrrd;
+        id_ex_syscall      <= inst_syscall;
+        id_ex_ertn         <= inst_ertn;
     end
 end
 
@@ -453,14 +480,71 @@ alu u_alu(
     .alu_result (exe_alu_result)
 );
 
+//-------------------------------------------------------------------------
+// [EX8] CSR 文件与异常处理（全部在 EXE 级完成，天然精确：
+//   老指令已在 MEM/WB 照常完成，young 指令由 IF/ID、ID/EXE valid 清零冲刷）
+//   CSR 译码只按低 7 位索引（用到的 0,1,4,5,6,7,c,30-33,40-44 低 7 位互不冲突）
+//-------------------------------------------------------------------------
+reg [31:0] csr_file [0:127];
+wire [13:0] exe_csr_addr  = id_ex_csr_addr;
+wire [ 6:0] exe_csr_index = id_ex_csr_addr[6:0];
+wire [31:0] csr_rdata     = csr_file[exe_csr_index];
+wire [31:0] csr_crmd      = csr_file[7'd0];
+wire [31:0] csr_prmd      = csr_file[7'd1];
+wire [31:0] csr_era       = csr_file[7'd6];
+wire [31:0] csr_eentry    = csr_file[7'd12];
+
+wire        exe_syscall  = id_ex_valid && id_ex_syscall;
+wire        exe_ertn     = id_ex_valid && id_ex_ertn;
+wire        exe_redirect = exe_syscall | exe_ertn;
+
+wire        csr_we       = id_ex_valid && (id_ex_csrwr | id_ex_csrxchg);
+wire [31:0] csr_old      = csr_rdata;
+wire [31:0] csr_new      = id_ex_csrwr   ? id_ex_rkd_value :           //csrwr：直接写 gr[rd]
+                           (csr_old & ~id_ex_rj_value)                 //csrxchg：rj=掩码
+                                 | (id_ex_rkd_value & id_ex_rj_value);
+
+always @(posedge clk) begin
+    if (reset) begin
+        csr_file[7'd0] <= 32'h8;                 //CRMD 复位：PLV=0 IE=0 DATF=01(直址)
+        csr_file[7'd1] <= 32'b0;                 //PRMD
+        csr_file[7'd4] <= 32'b0;                 //ECFG
+        csr_file[7'd5] <= 32'b0;                 //ESTAT
+        csr_file[7'd6] <= 32'b0;                 //ERA
+        csr_file[7'd7] <= 32'b0;                 //BADV
+        csr_file[7'd12]<= 32'b0;                 //EENTRY
+        csr_file[7'd64]<= 32'b0;                 //TID   (0x40)
+        csr_file[7'd65]<= 32'b0;                 //TCFG  (0x41)
+        csr_file[7'd66]<= 32'b0;                 //TVAL  (0x42)
+        csr_file[7'd68]<= 32'b0;                 //TICLR (0x44)
+    end else begin
+        // CSR 读改写指令（csrrd 不写）
+        if (csr_we) csr_file[exe_csr_index] <= csr_new;
+        // syscall：ERA=本指令 pc，ESTAT.Ecode=0xb，保存现场到 PRMD，特权级/中断关
+        if (exe_syscall) begin
+            csr_file[7'd6] <= id_ex_pc;
+            csr_file[7'd5] <= (csr_file[7'd5] & ~32'h003f0000) | 32'h000b0000;
+            csr_file[7'd1] <= {29'b0, csr_crmd[2], csr_crmd[1:0]};   //PIE/PPLV
+            csr_file[7'd0] <= (csr_crmd & ~32'h7) ;                  //PLV=0, IE=0
+        end
+        // ertn：回 ERA，从 PRMD 恢复 PLV/IE
+        if (exe_ertn) begin
+            csr_file[7'd0] <= {csr_crmd[31:3], csr_prmd[2], csr_prmd[1:0]};
+        end
+    end
+end
+
 // [EX7] 乘除单元：EXE 级多周期，ready_go 等 done；ack=指令离场拍
 wire       md_start = (id_ex_md_op != 3'd7) && !md_ack;   //离场拍不发起（新指令下一拍才发起）
 wire       md_done;
 wire [31:0] md_result;
 wire       md_ack;
 assign exe_ready_go = (id_ex_md_op == 3'd7) || md_done;
-// [EX7] EXE 级统一结果：muldiv 指令取 md_result，其余取 ALU（前递与写回共用）
-wire [31:0] exe_final_result = (id_ex_md_op != 3'd7) ? md_result : exe_alu_result;
+// [EX7] EXE 级统一结果：muldiv 指令取 md_result，CSR 指令取旧值（写回 rd），其余取 ALU
+wire       id_ex_csr_op  = id_ex_csrrd_flg | id_ex_csrwr | id_ex_csrxchg;
+wire [31:0] exe_final_result = (id_ex_md_op != 3'd7) ? md_result :
+                               id_ex_csr_op           ? csr_old        :
+                                                        exe_alu_result;
 muldiv u_muldiv(
     .clk    (clk        ),
     .reset  (reset      ),

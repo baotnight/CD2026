@@ -171,6 +171,12 @@ wire        inst_srai_w;
 wire        inst_addi_w;
 wire        inst_ld_w;
 wire        inst_st_w;
+wire        inst_ld_b;
+wire        inst_ld_h;
+wire        inst_ld_bu;
+wire        inst_ld_hu;
+wire        inst_st_b;
+wire        inst_st_h;
 wire        inst_jirl;
 wire        inst_b;
 wire        inst_bl;
@@ -239,6 +245,16 @@ assign inst_srai_w = op_31_26_d[6'h00] & op_25_22_d[4'h1] & op_21_20_d[2'h0] & o
 assign inst_addi_w = op_31_26_d[6'h00] & op_25_22_d[4'ha];
 assign inst_ld_w   = op_31_26_d[6'h0a] & op_25_22_d[4'h2];
 assign inst_st_w   = op_31_26_d[6'h0a] & op_25_22_d[4'h6];
+// [EX6] 实验4访存指令：load 族 op_25_22={bu,0,size}=0/1/2/8/9，store 族={0,size}+4=4/5/6
+assign inst_ld_b   = op_31_26_d[6'h0a] & op_25_22_d[4'h0];
+assign inst_ld_h   = op_31_26_d[6'h0a] & op_25_22_d[4'h1];
+assign inst_ld_bu  = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
+assign inst_ld_hu  = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
+assign inst_st_b   = op_31_26_d[6'h0a] & op_25_22_d[4'h4];
+assign inst_st_h   = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
+wire inst_load     = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
+wire inst_store    = inst_st_w | inst_st_b | inst_st_h;
+wire load_signed   = inst_ld_w | inst_ld_b | inst_ld_h;   //bu/hu 零扩展
 assign inst_jirl   = op_31_26_d[6'h13];
 assign inst_b      = op_31_26_d[6'h14];
 assign inst_bl     = op_31_26_d[6'h15];
@@ -263,7 +279,7 @@ assign inst_srl_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & o
 assign inst_sra_w  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h10];
 assign inst_pcaddu12i = op_31_26_d[6'h07] & ~inst[25];
 
-assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
+assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_load | inst_store
                     | inst_jirl | inst_bl | inst_pcaddu12i;
 assign alu_op[ 1] = inst_sub_w;
 assign alu_op[ 2] = inst_slt  | inst_slti;
@@ -278,7 +294,7 @@ assign alu_op[10] = inst_srai_w | inst_sra_w;
 assign alu_op[11] = inst_lu12i_w;
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
-assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w | inst_slti | inst_sltui;
+assign need_si12  =  inst_addi_w | inst_load | inst_store | inst_slti | inst_sltui;
 assign need_ui12  =  inst_andi | inst_ori | inst_xori;      //[EX4] 逻辑立即数零扩展
 assign need_si16  =  inst_jirl | inst_beq | inst_bne
                    | inst_blt | inst_bge | inst_bltu | inst_bgeu;   //[EX5]
@@ -296,20 +312,20 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
-assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w
+assign src_reg_is_rd = inst_beq | inst_bne | inst_store
                      | inst_blt | inst_bge | inst_bltu | inst_bgeu;   //[EX5]
 assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 assign src2_is_imm   = inst_slli_w | inst_srli_w | inst_srai_w |
-                       inst_addi_w | inst_ld_w   | inst_st_w   |
+                       inst_addi_w | inst_load   | inst_store  |
                        inst_lu12i_w| inst_jirl   | inst_bl     |
                        inst_slti   | inst_sltui  | inst_andi   |   //[EX4]
                        inst_ori    | inst_xori   | inst_pcaddu12i;
 
-assign res_from_mem  = inst_ld_w;
+assign res_from_mem  = inst_load;
 assign dst_is_r1     = inst_bl;
-assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b
+assign gr_we         = ~inst_store & ~inst_beq & ~inst_bne & ~inst_b
                        & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;  //[EX5]
-assign mem_we        = inst_st_w;
+assign mem_we        = inst_store;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
 
 assign rf_raddr1 = rj;
@@ -373,6 +389,10 @@ reg  [31:0] id_ex_imm;
 reg  [31:0] id_ex_rj_value;
 reg  [31:0] id_ex_rkd_value;
 reg  [31:0] id_ex_pc;
+reg         id_ex_st_b;        //[EX6] store 宽度（st_w 为默认）
+reg         id_ex_st_h;
+reg         id_ex_load_signed; //[EX6] load 符号扩展/零扩展
+reg  [ 1:0] id_ex_load_size;   //[EX6] 00=b 01=h 10=w
 
 always @(posedge clk) begin
     if (reset) begin
@@ -391,6 +411,10 @@ always @(posedge clk) begin
         id_ex_imm          <= imm;
         id_ex_rj_value     <= rj_value;
         id_ex_rkd_value    <= rkd_value;
+        id_ex_st_b         <= inst_st_b;
+        id_ex_st_h         <= inst_st_h;
+        id_ex_load_signed  <= load_signed;
+        id_ex_load_size    <= {inst_ld_w, inst_ld_h | inst_ld_hu};
     end
 end
 
@@ -411,9 +435,17 @@ alu u_alu(
 // 数据访存请求在 EXE 发出；BRAM 寄存式读下一拍（MEM）出数 [PIPE-1]
 // valid 门控：气泡不得访存（其控制位来自垃圾指令的 X，必须挡住）
 assign data_sram_en    = id_ex_valid && (id_ex_res_from_mem | id_ex_mem_we);
-assign data_sram_we    = {4{id_ex_valid && id_ex_mem_we}};   //ex1 仅 st.w 整字写
+// [EX6] 字节写使能按 vaddr 低两位生成；写数据按宽度复制到各字节道
+wire [1:0] exe_vaddr_lo = exe_alu_result[1:0];
+wire [3:0] exe_data_we  = id_ex_st_b ? (4'b0001 << exe_vaddr_lo) :
+                          id_ex_st_h ? (exe_vaddr_lo[1] ? 4'b1100 : 4'b0011) :
+                                       4'b1111;               //st.w 整字
+wire [31:0] exe_store_data = id_ex_st_b ? {4{id_ex_rkd_value[ 7:0]}} :
+                             id_ex_st_h ? {2{id_ex_rkd_value[15:0]}} :
+                                          id_ex_rkd_value;
+assign data_sram_we    = id_ex_valid && id_ex_mem_we ? exe_data_we : 4'b0;
 assign data_sram_addr  = exe_alu_result;
-assign data_sram_wdata = id_ex_rkd_value;
+assign data_sram_wdata = exe_store_data;
 
 //=========================================================================
 // EXE/MEM 流水寄存器
@@ -423,6 +455,8 @@ reg  [31:0] exe_mem_alu_result;
 reg         exe_mem_res_from_mem;
 reg         exe_mem_gr_we;
 reg  [ 4:0] exe_mem_dest;
+reg         exe_mem_load_signed;  //[EX6]
+reg  [ 1:0] exe_mem_load_size;   //[EX6]
 
 always @(posedge clk) begin
     if (reset) begin
@@ -435,13 +469,26 @@ always @(posedge clk) begin
         exe_mem_res_from_mem <= id_ex_res_from_mem;
         exe_mem_gr_we        <= id_ex_gr_we;
         exe_mem_dest         <= id_ex_dest;
+        exe_mem_load_signed  <= id_ex_load_signed;
+        exe_mem_load_size    <= id_ex_load_size;
     end
 end
 
 //=========================================================================
 // MEM 级：选定写回值（ld 的 BRAM 读数本拍有效）[PIPE-1]
+// [EX6] 子字 load：按 vaddr 低两位选字节道，再做符号/零扩展
 //=========================================================================
-wire [31:0] mem_final_result = exe_mem_res_from_mem ? data_sram_rdata
+wire [1:0] mem_vaddr_lo = exe_mem_alu_result[1:0];
+wire [ 7:0] mem_byte    = data_sram_rdata >> (mem_vaddr_lo * 8);
+wire [15:0] mem_half    = mem_vaddr_lo[1] ? data_sram_rdata[31:16]
+                                          : data_sram_rdata[15:0];
+wire [31:0] mem_load_data =
+    exe_mem_load_size[1]        ? data_sram_rdata :                      //ld.w
+    (~exe_mem_load_size[0] &  exe_mem_load_signed) ? {{24{mem_byte[7]}}, mem_byte}  :  //ld.b
+    (~exe_mem_load_size[0] & ~exe_mem_load_signed) ? {24'b0, mem_byte}              :  //ld.bu
+    ( exe_mem_load_signed) ? {{16{mem_half[15]}}, mem_half}               :          //ld.h
+                             {16'b0, mem_half};                                     //ld.hu
+wire [31:0] mem_final_result = exe_mem_res_from_mem ? mem_load_data
                                                     : exe_mem_alu_result;
 
 //=========================================================================

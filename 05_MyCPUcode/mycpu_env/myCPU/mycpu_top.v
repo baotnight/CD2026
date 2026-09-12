@@ -65,9 +65,24 @@ wire        id_valid  = if_id_valid;    //ID 级占位 = IF/ID 寄存器有效
 wire        exe_valid = id_ex_valid;
 wire        mem_valid = exe_mem_valid;
 
-wire        id_ready_go  = 1'b1;        //ex1 无停顿：译码/读寄存器一拍完成
-wire        exe_ready_go = 1'b1;
-wire        mem_ready_go = 1'b1;        //BRAM 读数 EXE 发起、MEM 到达，MEM 无需等待
+//-------------------------------------------------------------------------
+// [EX2] 实验2-阻塞：ID 源寄存器与 EXE/MEM/WB 目的寄存器同号（均非 0 号）→ ID 停等。
+//   保守判定：rj 一律视为源（bl 虽不用 rj 也停，只是多停几拍，不影响正确性）；
+//   第二源 = src_reg_is_rd ? rd : rk（beq/bne/st.w 用 rd，其余用 rk）。
+//   写 0 号寄存器不构成相关（r0 恒零）。停顿时：IF/ID、pc 原地保持
+//   （if_allowin=0），ID/EXE 插入气泡（id_ex_valid<=0），老指令照常前进，无死锁。
+//   [EX3] 将被前递替代——load 之外的 RAW 全靠旁路，仅保留 load delay 停顿。
+//-------------------------------------------------------------------------
+wire [4:0] id_src2 = src_reg_is_rd ? rd : rk;
+wire id_stall_ex  = id_ex_valid  && id_ex_gr_we  && (id_ex_dest  != 5'd0)
+                    && (id_ex_dest  == rj || id_ex_dest  == id_src2);
+wire id_stall_mem = exe_mem_valid && exe_mem_gr_we && (exe_mem_dest != 5'd0)
+                    && (exe_mem_dest == rj || exe_mem_dest == id_src2);
+wire id_stall_wb  = mem_wb_valid  && mem_wb_gr_we  && (mem_wb_dest  != 5'd0)
+                    && (mem_wb_dest  == rj || mem_wb_dest  == id_src2);
+wire id_ready_go  = !(id_stall_ex | id_stall_mem | id_stall_wb);
+wire exe_ready_go = 1'b1;
+wire mem_ready_go = 1'b1;        //BRAM 读数 EXE 发起、MEM 到达，MEM 无需等待
 
 wire        wb_allowin  = 1'b1;         //WB 每拍必然写完
 wire        mem_allowin = ~mem_valid | (mem_ready_go & wb_allowin );
@@ -90,7 +105,10 @@ always @(posedge clk) begin
     else if (if_allowin) pc <= nextpc;
 end
 
-assign inst_sram_en    = 1'b1;             //IF 每拍发请求（假取指的返回值会被丢弃）
+// [EX2-修正] 取指请求门控 if_allowin：ID 停顿时 if_allowin=0，BRAM 输出保持（en=0 时
+//   寄存器不更新），与原地保持的 IF/ID 严格对齐。若恒发请求，停顿期间 BRAM 会取到
+//   pc+4 的新指令，ID 译码的 inst 与 if_id_pc 错位一条（ex2 首跑踩坑）。
+assign inst_sram_en    = if_allowin;
 assign inst_sram_we    = 4'b0;             //指令侧从不写
 assign inst_sram_addr  = pc;
 assign inst_sram_wdata = 32'b0;

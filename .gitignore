@@ -29,3 +29,6 @@ vivado*.log
 *.bit
 *.ltx
 golden_trace.txt
+# rv32_check 的 iverilog 编译产物（74KB vvp 可执行文件，2026-09-10 误入库）：
+# 只忽略这一个是编译产物的名字，rv32_check/ 下的 .py/.S/.v 源码全部保留入库
+/rv32_check/sim

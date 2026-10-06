@@ -32,3 +32,11 @@ golden_trace.txt
 # rv32_check 的 iverilog 编译产物（74KB vvp 可执行文件，2026-09-10 误入库）：
 # 只忽略这一个是编译产物的名字，rv32_check/ 下的 .py/.S/.v 源码全部保留入库
 /rv32_check/sim
+
+# ── Markdown 文档一律不跟踪（2026-10-06 起）──
+#   理由：摘要/台账/溯源/手册/各区 README 都是本地工作与复盘用的，随时会改写，
+#   不希望它们混进提交（代码与脚本 *.v/*.sh/*.S/Makefile/*.py 不受影响）。
+#   注意：已跟踪的文件不会因 ignore 规则自动脱管，必须 git rm --cached 一次（已做）。
+*.md
+# 整理期间的临时核对脚本目录
+/.tmp_decode/
